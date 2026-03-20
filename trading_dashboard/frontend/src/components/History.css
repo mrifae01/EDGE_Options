@@ -1,0 +1,2 @@
+.history-day-header { display: flex; align-items: center; gap: 16px; margin-bottom: 14px; }
+.history-date { font-size: 15px; font-weight: 500; color: var(--text-1); }

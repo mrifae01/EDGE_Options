@@ -1,0 +1,22 @@
+[
+  {
+    "id": "pilot",
+    "name": "Pilot Strategy",
+    "description": "Momentum breakout: RSI 50-70 / 30-50, Price vs EMA20 + SMA50, volume surge, MACD crossover, ADX > 25",
+    "version": 1,
+    "params": {
+      "rsi_period": 14,
+      "ema_period": 20,
+      "sma_period": 50,
+      "macd_fast": 12,
+      "macd_slow": 26,
+      "macd_signal": 9,
+      "adx_period": 14,
+      "vol_mult": 1.5,
+      "macd_lookback": 3,
+      "adx_min": 25
+    },
+    "universe": "sp500",
+    "locked": true
+  }
+]

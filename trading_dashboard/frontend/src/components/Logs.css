@@ -1,0 +1,13 @@
+.logs-wrap { display: flex; flex-direction: column; height: calc(100vh - 140px); }
+.logs-header { display: flex; justify-content: space-between; font-size: 11px; letter-spacing: 0.1em; padding: 0 0 10px; }
+.logs-terminal { flex: 1; background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 16px; overflow-y: auto; font-family: var(--font-mono); font-size: 12px; line-height: 1.7; }
+.log-line    { display: flex; gap: 16px; white-space: pre-wrap; word-break: break-all; }
+.log-idx     { min-width: 36px; user-select: none; opacity: 0.4; }
+.log-default { color: var(--text-2); }
+.log-entry   { color: var(--blue); }
+.log-tp      { color: var(--green); }
+.log-stop    { color: var(--red); }
+.log-warn    { color: var(--amber); }
+.log-error   { color: var(--red); font-weight: 600; }
+.log-dim     { color: var(--text-3); }
+.log-boot    { color: var(--blue); opacity: 0.7; }

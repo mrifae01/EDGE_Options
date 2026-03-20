@@ -1,0 +1,206 @@
+/* ── Layout ── */
+.overview {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.overview-top {
+  display: grid;
+  grid-template-columns: 420px 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+/* ── Sentiment card ── */
+.sentiment-card { display: flex; flex-direction: column; gap: 12px; }
+
+.sentiment-body {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.gauge-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.gauge-label {
+  font-family: var(--font-display);
+  font-size: 22px;
+  letter-spacing: 0.06em;
+  margin-top: -4px;
+}
+.gauge-sublabels {
+  display: flex;
+  justify-content: space-between;
+  width: 180px;
+}
+
+/* Signal breakdown */
+.sentiment-signals {
+  flex: 1;
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding-top: 8px;
+}
+.sig-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+  gap: 12px;
+}
+.sig-row:last-child { border-bottom: none; }
+.sig-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.dot-bull { background: var(--green); }
+.dot-bear { background: var(--red); }
+
+/* ── Index tiles grid ── */
+.indices-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+
+.index-tile {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: border-color 0.15s;
+}
+.tile-up   { border-left: 3px solid var(--green); }
+.tile-down { border-left: 3px solid var(--red); }
+.tile-loading { border-left: 3px solid var(--border); }
+
+.index-symbol {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text-2);
+}
+.index-name {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  margin-bottom: 6px;
+}
+.index-price {
+  font-family: var(--font-display);
+  font-size: 26px;
+  letter-spacing: 0.04em;
+  color: var(--text-1);
+  line-height: 1;
+}
+.index-chg {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+/* Clickable tile */
+.index-tile {
+  cursor: pointer;
+  position: relative;
+  transition: border-color 0.15s, background 0.15s, transform 0.1s;
+}
+.index-tile:hover { background: var(--bg-2); transform: translateY(-1px); }
+.tile-selected {
+  background: var(--bg-2) !important;
+  box-shadow: 0 0 0 1px var(--blue);
+}
+.tile-selected-bar {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  height: 2px;
+  background: var(--blue);
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+}
+
+/* sma-card removed */
+
+/* ── SPY Chart ── */
+.chart-card { padding: 20px 24px 0; }
+
+.spy-chart-wrap {
+  position: relative;
+  height: 480px;
+  margin: 0 -24px;
+}
+.spy-chart-container {
+  width: 100%;
+  height: 100%;
+  transition: opacity 0.3s;
+}
+.chart-loader {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+.chart-legend {
+  position: absolute;
+  top: 8px;
+  left: 28px;
+  display: flex;
+  gap: 16px;
+  z-index: 2;
+  pointer-events: none;
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+}
+.legend-line {
+  width: 16px;
+  height: 2px;
+  border-radius: 1px;
+}
+
+/* ── Misc ── */
+.card-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.loading-pulse {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--blue);
+  animation: pulse 1s ease-in-out infinite;
+}
+@keyframes pulse { 0%,100%{opacity:0.3} 50%{opacity:1} }
+@keyframes spin-anim { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+.spin-anim { animation: spin-anim 1s linear infinite; }
+
+/* ── Responsive ── */
+@media (max-width: 960px) {
+  .overview-top { grid-template-columns: 1fr; }
+  .indices-grid { grid-template-columns: repeat(2, 1fr); }
+}

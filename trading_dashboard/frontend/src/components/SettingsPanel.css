@@ -1,0 +1,15 @@
+.settings-note { font-size: 11px; margin-bottom: 20px; padding: 10px 12px; background: var(--amber-mute); border: 1px solid #ffc10720; border-radius: var(--radius); color: var(--amber); }
+.settings-list { display: flex; flex-direction: column; }
+.setting-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding: 18px 0; border-bottom: 1px solid var(--border); }
+.setting-row:last-child { border-bottom: none; }
+.setting-info  { flex: 1; }
+.setting-label { font-size: 14px; font-weight: 500; color: var(--text-1); margin-bottom: 4px; }
+.setting-desc  { font-size: 12px; line-height: 1.5; }
+.setting-input { display: flex; flex-direction: column; gap: 6px; min-width: 160px; align-items: flex-end; }
+.input-with-unit { display: flex; align-items: center; gap: 8px; width: 100%; }
+.input-with-unit input { width: 100px; text-align: right; }
+.unit { font-size: 13px; min-width: 24px; }
+.setting-current { font-size: 11px; color: var(--text-3); }
+.param-explainer { display: flex; flex-direction: column; gap: 12px; font-size: 12px; }
+.param-flow { display: flex; align-items: center; gap: 12px; }
+.arrow { color: var(--text-3); font-size: 16px; }

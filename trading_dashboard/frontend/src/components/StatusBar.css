@@ -1,0 +1,41 @@
+.statusbar { display: flex; flex-direction: column; gap: 8px; }
+
+.status-indicator { display: flex; align-items: center; gap: 8px; }
+.dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.dot-live { background: var(--green); box-shadow: 0 0 6px var(--green); animation: pulse-green 2s infinite; }
+.dot-off  { background: var(--text-3); }
+
+.status-label { font-size: 11px; font-weight: 600; letter-spacing: 0.1em; }
+.status-meta  { font-size: 10px; line-height: 1.4; color: var(--text-3); font-family: var(--font-mono); }
+.carry-tag    { color: var(--amber); }
+
+.market-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  line-height: 1.5;
+  color: var(--amber);
+  background: var(--amber-mute);
+  border: 1px solid #ffc10725;
+  border-radius: var(--radius);
+  padding: 7px 8px;
+}
+.market-warning svg { flex-shrink: 0; margin-top: 1px; }
+
+.status-btn { width: 100%; justify-content: center; font-size: 12px; padding: 8px; }
+
+.status-msg {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  line-height: 1.5;
+  border-radius: var(--radius);
+  padding: 6px 8px;
+}
+.status-msg-ok    { color: var(--green); background: var(--green-mute); }
+.status-msg-warn  { color: var(--amber); background: var(--amber-mute); }
+.status-msg-error { color: var(--red);   background: var(--red-mute); }

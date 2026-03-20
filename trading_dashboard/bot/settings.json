@@ -1,0 +1,7 @@
+{
+  "tp_pct": 0.25,
+  "hard_stop_pct": 0.5,
+  "trail_offset": 0.2,
+  "gap_limit": 0.03,
+  "poll_seconds": 60
+}
