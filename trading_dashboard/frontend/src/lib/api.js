@@ -39,4 +39,22 @@ export const api = {
   updateStrategy:    (id, body)            => req('PATCH',  `/strategies/${id}`, body),
   deleteStrategy:    (id)                  => req('DELETE', `/strategies/${id}`),
   runStrategy:       (id)                  => req('POST',   `/strategies/${id}/run`),
+
+  // ── Bull Call Spread ──────────────────────────────────────────────────────
+  getBCSSettings:      ()               => req('GET',    '/bcs/settings'),
+  saveBCSSettings:     (s)              => req('POST',   '/bcs/settings', s),
+  runBCSScan:          (tickers = null) => req('POST',   '/bcs/scan', tickers ? { tickers } : undefined),
+  getBCSPositions:     ()               => req('GET',    '/bcs/positions'),
+  monitorBCSPositions: ()               => req('POST',   '/bcs/monitor'),
+  placeBCSSpread:      (body)           => req('POST',   '/bcs/place', body),
+  closeBCSPosition:    (id)             => req('DELETE', `/bcs/positions/${id}`),
+
+  // ── Bear Put Spread ───────────────────────────────────────────────────────
+  getBPSSettings:      ()               => req('GET',    '/bps/settings'),
+  saveBPSSettings:     (s)              => req('POST',   '/bps/settings', s),
+  runBPSScan:          (tickers = null) => req('POST',   '/bps/scan', tickers ? { tickers } : undefined),
+  getBPSPositions:     ()               => req('GET',    '/bps/positions'),
+  monitorBPSPositions: ()               => req('POST',   '/bps/monitor'),
+  placeBPSSpread:      (body)           => req('POST',   '/bps/place', body),
+  closeBPSPosition:    (id)             => req('DELETE', `/bps/positions/${id}`),
 }

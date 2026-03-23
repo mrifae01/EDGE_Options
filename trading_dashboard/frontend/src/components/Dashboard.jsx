@@ -347,12 +347,27 @@ function PositionCard({ pos, onUpdate, onClosePosition, onSelect, selected }) {
         <div>
           <div className="pos-ticker">{pos.ticker}</div>
           <div className="pos-contract mono dim">{pos.contract}</div>
+          {pos.spread_pair && (
+            <div className="pos-contract mono dim" style={{ fontSize: 10, marginTop: 1 }}>
+              pair: {pos.spread_pair}
+            </div>
+          )}
         </div>
         <div style={{display:'flex', alignItems:'flex-start', gap:8}}>
           <div className="pos-badges">
             <span className={`badge ${pos.status === 'carry' ? 'badge-amber' : 'badge-blue'}`}>
               {pos.status === 'carry' ? 'CARRY' : 'ACTIVE'}
             </span>
+            {pos.strategy_label === 'bull_call_spread' && (
+              <span className="badge badge-purple">
+                BULL SPREAD {pos.spread_leg === 'short' ? '· SHORT LEG' : ''}
+              </span>
+            )}
+            {pos.strategy_label === 'bear_put_spread' && (
+              <span className="badge badge-red">
+                BEAR SPREAD {pos.spread_leg === 'short' ? '· SHORT LEG' : ''}
+              </span>
+            )}
             {isPartial && <span className="badge badge-green">PARTIAL ✓</span>}
           </div>
           <button

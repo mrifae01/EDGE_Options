@@ -561,6 +561,93 @@
 }
 .form-group input { height: 34px; font-size: 13px; }
 
+/* ── Chain mode tabs (Single Leg / Bull Spread) ── */
+.chain-mode-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+.chain-mode-tab {
+  flex: 1;
+  padding: 8px 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.chain-mode-tab:hover  { color: var(--text-2); }
+.chain-mode-tab.active { color: var(--blue); border-bottom-color: var(--blue); }
+.chain-mode-tab-bear.active { color: var(--red); border-bottom-color: var(--red); }
+
+/* ── Bull Spread legs ── */
+.chain-spread-legs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.chain-spread-leg {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+.chain-spread-leg-long  { border-left: 3px solid var(--green-dim); }
+.chain-spread-leg-short { border-left: 3px solid var(--red-dim); }
+.chain-spread-leg-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  margin-bottom: 4px;
+}
+.chain-spread-leg-long  .chain-spread-leg-label { color: var(--green-dim); }
+.chain-spread-leg-short .chain-spread-leg-label { color: var(--red-dim); }
+.chain-spread-leg-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+/* ── Bull Spread risk grid ── */
+.chain-spread-risk {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin-bottom: 4px;
+}
+.chain-spread-risk-cell { display: flex; flex-direction: column; gap: 3px; }
+.chain-spread-risk-cell .mono { font-size: 13px; }
+
+/* ── Short-strike selector inside spread panel ── */
+.chain-spread-strike-sel {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--bg-3);
+  border: 1px solid var(--border-hi);
+  color: var(--text-1);
+  border-radius: var(--radius);
+  padding: 2px 6px;
+  width: auto;
+  cursor: pointer;
+}
+.chain-spread-strike-sel:focus { border-color: var(--blue); outline: none; }
+
 /* ── AI pills ── */
 .ai-pills { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
 .ai-pill {
@@ -754,6 +841,100 @@
   padding: 48px 20px;
   text-align: center;
 }
+
+/* ── Watchlist Bull Spread quick-builder panel ── */
+.wl-bcs-panel {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-left: 3px solid #a78bfa;
+  border-radius: var(--radius-lg);
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+.wl-bcs-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+}
+.wl-bcs-scan-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  padding: 4px 10px;
+}
+.wl-bcs-hint {
+  font-size: 11px;
+  padding: 10px 14px;
+  color: var(--text-3);
+}
+.wl-bcs-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--red);
+  padding: 10px 14px;
+  font-family: var(--font-mono);
+}
+.wl-bcs-result { padding: 12px 14px; }
+
+/* Two legs side by side */
+.wl-bcs-legs {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.wl-bcs-leg {
+  flex: 1;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+}
+.wl-bcs-leg-long  { border-left: 3px solid var(--green-dim); }
+.wl-bcs-leg-short { border-left: 3px solid var(--red-dim); }
+.wl-bcs-leg-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+.wl-bcs-leg-long  .wl-bcs-leg-label { color: var(--green-dim); }
+.wl-bcs-leg-short .wl-bcs-leg-label { color: var(--red-dim); }
+.wl-bcs-divider {
+  display: flex;
+  align-items: center;
+  font-size: 16px;
+  padding: 0 2px;
+  flex-shrink: 0;
+}
+
+/* Risk metrics row */
+.wl-bcs-risk {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  margin-bottom: 10px;
+}
+.wl-bcs-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.wl-bcs-metric .mono { font-size: 12px; }
+.wl-bcs-place-btn { width: 100%; justify-content: center; height: 36px; }
+.wl-bcs-msg { font-size: 12px; margin-top: 8px; padding: 0 2px; }
 
 /* ── Chain expiry pills ── */
 .chain-expiry-pills {

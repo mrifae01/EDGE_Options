@@ -30,6 +30,10 @@ trading_dashboard/bot/bot.log
 trading_dashboard/bot/*.log
 trading_dashboard/bot/*.pid
 
+# Spread strategy runtime state (positions are user-data, not source)
+trading_dashboard/bot/bcs_state.json
+trading_dashboard/bot/bps_state.json
+
 # Logs
 *.log
 

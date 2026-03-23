@@ -61,11 +61,12 @@ html, body, #root {
   letter-spacing: 0.05em;
   text-transform: uppercase;
 }
-.badge-green { background: var(--green-mute); color: var(--green); border: 1px solid #00e67630; }
-.badge-red   { background: var(--red-mute);   color: var(--red);   border: 1px solid #ff3d5730; }
-.badge-amber { background: var(--amber-mute); color: var(--amber); border: 1px solid #ffc10730; }
-.badge-blue  { background: var(--blue-mute);  color: var(--blue);  border: 1px solid #29b6f630; }
-.badge-dim   { background: var(--bg-3); color: var(--text-2); border: 1px solid var(--border); }
+.badge-green  { background: var(--green-mute); color: var(--green); border: 1px solid #00e67630; }
+.badge-red    { background: var(--red-mute);   color: var(--red);   border: 1px solid #ff3d5730; }
+.badge-amber  { background: var(--amber-mute); color: var(--amber); border: 1px solid #ffc10730; }
+.badge-blue   { background: var(--blue-mute);  color: var(--blue);  border: 1px solid #29b6f630; }
+.badge-dim    { background: var(--bg-3); color: var(--text-2); border: 1px solid var(--border); }
+.badge-purple { background: rgba(167,139,250,0.15); color: #a78bfa; border: 1px solid rgba(167,139,250,0.3); }
 
 button { font-family: var(--font-body); cursor: pointer; border: none; outline: none; }
 

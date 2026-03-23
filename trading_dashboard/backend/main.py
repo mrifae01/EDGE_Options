@@ -450,6 +450,54 @@ def get_positions():
             for pos2 in positions:
                 pos2.setdefault("stock_price", None)
 
+    # Tag positions that belong to a spread strategy so the Dashboard can label them
+    try:
+        # Build lookup maps for BCS (bull call spread)
+        bcs_state = _load_bcs_state()
+        bcs_open  = [p for p in bcs_state.get("positions", []) if p.get("status") == "open"]
+        bcs_long  = {p["long_contract"]:  p for p in bcs_open}
+        bcs_short = {p["short_contract"]: p for p in bcs_open}
+
+        # Build lookup maps for BPS (bear put spread)
+        bps_state = _load_bps_state()
+        bps_open  = [p for p in bps_state.get("positions", []) if p.get("status") == "open"]
+        bps_long  = {p["long_contract"]:  p for p in bps_open}
+        bps_short = {p["short_contract"]: p for p in bps_open}
+
+        for pos2 in positions:
+            sym2 = pos2["contract"]
+            if sym2 in bcs_long:
+                sp = bcs_long[sym2]
+                pos2["strategy_label"] = "bull_call_spread"
+                pos2["spread_leg"]     = "long"
+                pos2["spread_pair"]    = sp.get("short_contract")
+                pos2["spread_id"]      = sp.get("id")
+            elif sym2 in bcs_short:
+                sp = bcs_short[sym2]
+                pos2["strategy_label"] = "bull_call_spread"
+                pos2["spread_leg"]     = "short"
+                pos2["spread_pair"]    = sp.get("long_contract")
+                pos2["spread_id"]      = sp.get("id")
+            elif sym2 in bps_long:
+                sp = bps_long[sym2]
+                pos2["strategy_label"] = "bear_put_spread"
+                pos2["spread_leg"]     = "long"
+                pos2["spread_pair"]    = sp.get("short_contract")
+                pos2["spread_id"]      = sp.get("id")
+            elif sym2 in bps_short:
+                sp = bps_short[sym2]
+                pos2["strategy_label"] = "bear_put_spread"
+                pos2["spread_leg"]     = "short"
+                pos2["spread_pair"]    = sp.get("long_contract")
+                pos2["spread_id"]      = sp.get("id")
+            else:
+                pos2.setdefault("strategy_label", None)
+                pos2.setdefault("spread_leg",     None)
+                pos2.setdefault("spread_pair",    None)
+                pos2.setdefault("spread_id",      None)
+    except Exception:
+        pass
+
     return {"positions": positions}
 
 
@@ -2789,6 +2837,1296 @@ def debug_option_chain(symbol: str = "AAPL", expiry: str = ""):
         }
     except Exception as e:
         return {"error": str(e)}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Bull Call Spread Strategy ──────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+BCS_SETTINGS_FILE = BOT_DIR / "bcs_settings.json"
+BCS_STATE_FILE    = BOT_DIR / "bcs_state.json"
+
+
+class BullCallSpreadSettings(BaseModel):
+    enabled:           bool  = True
+    # Stock universe / price filter
+    universe:          str   = "usa"
+    price_min:         float = 50.0
+    price_max:         float = 200.0
+    # Spread construction
+    spread_width_pct:  float = 0.075   # short strike = stock * (1 + this)
+    # DTE targeting
+    dte_min:           int   = 30
+    dte_max:           int   = 45
+    prefer_monthly:    bool  = True    # prefer 3rd-Friday monthly expirations
+    # Risk management
+    max_debit_pct:     float = 0.02    # max % of portfolio value per spread
+    qty:               int   = 1       # contracts per spread
+    # Exit rules
+    profit_target_pct: float = 0.50   # close when gain ≥ 50 % of debit paid
+    stop_loss_pct:     float = 0.50   # close when loss ≥ 50 % of debit paid
+    time_stop_dte:     int   = 21     # close when DTE reaches this value
+    # Bot poll cadence
+    poll_seconds:      int   = 300
+
+
+# ── BCS file helpers ───────────────────────────────────────────────────────────
+
+def _load_bcs_settings() -> dict:
+    if not BCS_SETTINGS_FILE.exists():
+        return BullCallSpreadSettings().model_dump()
+    try:
+        return json.loads(BCS_SETTINGS_FILE.read_text())
+    except Exception:
+        return BullCallSpreadSettings().model_dump()
+
+
+def _save_bcs_settings(s: dict):
+    BCS_SETTINGS_FILE.write_text(json.dumps(s, indent=2))
+
+
+def _load_bcs_state() -> dict:
+    if not BCS_STATE_FILE.exists():
+        return {"positions": []}
+    try:
+        return json.loads(BCS_STATE_FILE.read_text())
+    except Exception:
+        return {"positions": []}
+
+
+def _save_bcs_state(state: dict):
+    tmp = str(BCS_STATE_FILE) + ".tmp"
+    Path(tmp).write_text(json.dumps(state, indent=2))
+    os.replace(tmp, BCS_STATE_FILE)
+
+
+# ── BCS strategy helpers ───────────────────────────────────────────────────────
+
+def _bcs_is_bullish_trend(bars: list) -> bool:
+    """
+    Returns True when the stock satisfies all three bullish-trend conditions:
+      1. Current close > SMA20
+      2. Current close > SMA50
+      3. The most recent 10-day window shows a higher high AND a higher low
+         compared with the prior 10-day window  (= making HH/HL on daily chart).
+    """
+    if len(bars) < 55:
+        return False
+
+    closes = [b["c"] for b in bars]
+    sma20_vals = _sma(closes, 20)
+    sma50_vals = _sma(closes, 50)
+
+    def last(lst):
+        return next((v for v in reversed(lst) if v is not None), None)
+
+    sma20 = last(sma20_vals)
+    sma50 = last(sma50_vals)
+    price = closes[-1]
+
+    if sma20 is None or sma50 is None:
+        return False
+    if price <= sma20 or price <= sma50:
+        return False
+
+    # Higher-highs / higher-lows via 10-bar rolling windows
+    recent_high = max(b["h"] for b in bars[-10:])
+    recent_low  = min(b["l"] for b in bars[-10:])
+    prior_high  = max(b["h"] for b in bars[-20:-10])
+    prior_low   = min(b["l"] for b in bars[-20:-10])
+
+    return recent_high > prior_high and recent_low > prior_low
+
+
+def _bcs_detect_entry_trigger(bars: list) -> tuple:
+    """
+    Detects: pullback to SMA20 support  →  red candle at support  →  green bounce
+    with above-average volume on the bounce candle.
+
+    Looks back up to 3 bars for the red/green pair so the scan isn't strictly
+    limited to "yesterday was red, today is green."
+
+    Returns (triggered: bool, details: dict | None).
+    """
+    if len(bars) < 25:
+        return False, None
+
+    closes  = [b["c"] for b in bars]
+    volumes = [b["v"] for b in bars]
+
+    sma20_vals = _sma(closes, 20)
+
+    def last(lst):
+        return next((v for v in reversed(lst) if v is not None), None)
+
+    sma20 = last(sma20_vals)
+    if sma20 is None:
+        return False, None
+
+    avg_vol = sum(volumes[-21:-1]) / 20 if len(volumes) >= 21 else sum(volumes) / max(len(volumes), 1)
+
+    # Slide the window: red_bar = bars[-lookback-1], green_bar = bars[-lookback]
+    for lookback in range(1, 4):
+        if lookback + 1 > len(bars):
+            continue
+        red_bar   = bars[-(lookback + 1)]
+        green_bar = bars[-lookback]
+
+        is_red   = red_bar["c"]   < red_bar["o"]
+        is_green = green_bar["c"] > green_bar["o"]
+        if not (is_red and is_green):
+            continue
+
+        # Red candle low within 3 % of SMA20 = "touching support"
+        near_support  = abs(red_bar["l"] - sma20) / sma20 <= 0.03
+        strong_volume = green_bar.get("v", 0) > avg_vol
+
+        if near_support and strong_volume:
+            return True, {
+                "red_candle":  {
+                    "date":  red_bar.get("t", "")[:10],
+                    "open":  red_bar["o"],
+                    "close": red_bar["c"],
+                    "low":   red_bar["l"],
+                },
+                "green_candle": {
+                    "date":   green_bar.get("t", "")[:10],
+                    "open":   green_bar["o"],
+                    "close":  green_bar["c"],
+                    "volume": green_bar["v"],
+                },
+                "sma20":      round(sma20, 2),
+                "avg_volume": round(avg_vol),
+            }
+
+    return False, None
+
+
+def _bcs_find_expiry(dte_min: int, dte_max: int, prefer_monthly: bool) -> str:
+    """
+    Return an expiry date string (YYYY-MM-DD) that falls inside [dte_min, dte_max].
+    When prefer_monthly is True, tries to land on the 3rd Friday of each month
+    before falling back to exactly dte_min days out.
+    """
+    from datetime import timedelta
+    today    = date.today()
+    min_date = today + timedelta(days=dte_min)
+    max_date = today + timedelta(days=dte_max)
+
+    if prefer_monthly:
+        for month_offset in range(4):
+            ref   = today + timedelta(days=month_offset * 30)
+            first = ref.replace(day=1)
+            # Weekday of the 1st: 0=Mon … 4=Fri … 6=Sun
+            days_to_friday = (4 - first.weekday()) % 7
+            first_friday   = first + timedelta(days=days_to_friday)
+            third_friday   = first_friday + timedelta(weeks=2)
+            if min_date <= third_friday <= max_date:
+                return third_friday.isoformat()
+
+    return min_date.isoformat()
+
+
+def _bcs_find_strikes(chain: list, stock_price: float, spread_width_pct: float) -> tuple:
+    """
+    From a list of call option contracts (single expiry), pick:
+      long  strike → ATM  (closest to stock_price)
+      short strike → closest to stock_price * (1 + spread_width_pct), must be > long
+
+    Returns (long_contract_dict, short_contract_dict) or (None, None) on failure.
+    """
+    calls = [c for c in chain if c.get("type") == "call" and c.get("strike") is not None]
+    if not calls:
+        return None, None
+
+    calls.sort(key=lambda c: c["strike"])
+    long_item    = min(calls, key=lambda c: abs(c["strike"] - stock_price))
+    short_target = stock_price * (1.0 + spread_width_pct)
+    short_item   = min(calls, key=lambda c: abs(c["strike"] - short_target))
+
+    # Guarantee short strike is strictly above long strike
+    if short_item["strike"] <= long_item["strike"]:
+        above = [c for c in calls if c["strike"] > long_item["strike"]]
+        if not above:
+            return long_item, None
+        short_item = above[0]
+
+    return long_item, short_item
+
+
+def _bcs_net_debit(long_item: dict, short_item: dict) -> Optional[float]:
+    """
+    Worst-case net debit per share = long ask − short bid.
+    Falls back to mid-price difference when bid/ask are unavailable.
+    """
+    long_ask  = long_item.get("ask")
+    short_bid = short_item.get("bid")
+    if long_ask is not None and short_bid is not None:
+        return round(long_ask - short_bid, 2)
+    # mid fallback
+    lm = long_item.get("mid")
+    sm = short_item.get("mid")
+    if lm is not None and sm is not None:
+        return round(lm - sm, 2)
+    return None
+
+
+def _bcs_scan(settings: dict, tickers_override: Optional[List[str]] = None) -> dict:
+    """
+    Full scanner:
+      1. Pull daily bars for the chosen universe (or tickers_override list).
+      2. Filter by price range, bullish trend, and entry trigger.
+      3. For each candidate, fetch the option chain and build the spread.
+    Returns {"candidates": [...], "scanned": N, "matched": N, ...}.
+    """
+    universe         = settings.get("universe", "usa")
+    price_min        = settings.get("price_min", 50.0)
+    price_max        = settings.get("price_max", 200.0)
+    dte_min          = settings.get("dte_min", 30)
+    dte_max          = settings.get("dte_max", 45)
+    prefer_monthly   = settings.get("prefer_monthly", True)
+    spread_width_pct = settings.get("spread_width_pct", 0.075)
+    qty              = settings.get("qty", 1)
+
+    if tickers_override:
+        tickers = [t.upper().strip() for t in tickers_override if t.strip()]
+    else:
+        tickers = list(STOCK_UNIVERSES.get(universe, STOCK_UNIVERSES["usa"]))
+    bars_map      = _fetch_multi_bars(tickers, 120)
+    target_expiry = _bcs_find_expiry(dte_min, dte_max, prefer_monthly)
+
+    candidates, errors = [], []
+
+    for ticker in tickers:
+        bars = bars_map.get(ticker, [])
+        if len(bars) < 55:
+            continue
+
+        price = bars[-1]["c"]
+        if not (price_min <= price <= price_max):
+            continue
+
+        if not _bcs_is_bullish_trend(bars):
+            continue
+
+        triggered, trigger_details = _bcs_detect_entry_trigger(bars)
+        if not triggered:
+            continue
+
+        # Fetch calls for the target expiry, bracket ±15 % around current price
+        try:
+            chain = _get_option_chain(
+                underlying=ticker,
+                expiry_date=target_expiry,
+                option_type="call",
+                strike_gte=round(price * 0.88, 2),
+                strike_lte=round(price * 1.20, 2),
+            )
+        except Exception as e:
+            errors.append(f"{ticker}: option chain error — {e}")
+            continue
+
+        if not chain:
+            errors.append(f"{ticker}: no calls found for expiry {target_expiry}")
+            continue
+
+        long_item, short_item = _bcs_find_strikes(chain, price, spread_width_pct)
+        if long_item is None or short_item is None:
+            errors.append(f"{ticker}: could not find suitable strikes")
+            continue
+
+        net_debit = _bcs_net_debit(long_item, short_item)
+        if net_debit is None or net_debit <= 0:
+            errors.append(f"{ticker}: invalid net debit ({net_debit})")
+            continue
+
+        # Liquidity check: require a valid bid/ask on both legs
+        if long_item.get("bid") is None or short_item.get("ask") is None:
+            errors.append(f"{ticker}: insufficient option liquidity")
+            continue
+
+        spread_width = round(short_item["strike"] - long_item["strike"], 2)
+        max_gain     = round((spread_width - net_debit) * 100, 2)
+        max_loss     = round(net_debit * 100, 2)
+        risk_reward  = round(max_gain / max_loss, 2) if max_loss > 0 else None
+        dte          = long_item.get("dte") or short_item.get("dte")
+
+        candidates.append({
+            "ticker":                  ticker,
+            "price":                   round(price, 2),
+            "expiry":                  target_expiry,
+            "dte":                     dte,
+            "long_contract":           long_item["symbol"],
+            "short_contract":          short_item["symbol"],
+            "long_strike":             long_item["strike"],
+            "short_strike":            short_item["strike"],
+            "spread_width":            spread_width,
+            "long_bid":                long_item.get("bid"),
+            "long_ask":                long_item.get("ask"),
+            "short_bid":               short_item.get("bid"),
+            "short_ask":               short_item.get("ask"),
+            "net_debit":               net_debit,
+            "net_debit_total":         round(net_debit * 100 * qty, 2),
+            "max_gain_per_contract":   max_gain,
+            "max_loss_per_contract":   max_loss,
+            "risk_reward":             risk_reward,
+            "long_delta":              long_item.get("delta"),
+            "long_iv":                 long_item.get("iv"),
+            "long_volume":             long_item.get("volume"),
+            "short_volume":            short_item.get("volume"),
+            "trigger":                 trigger_details,
+        })
+
+    candidates.sort(key=lambda x: x.get("risk_reward") or 0, reverse=True)
+    return {
+        "candidates":    candidates,
+        "scanned":       len(tickers),
+        "matched":       len(candidates),
+        "target_expiry": target_expiry,
+        "errors":        errors[:20],
+    }
+
+
+def _bcs_get_position_pl(pos: dict) -> dict:
+    """
+    Fetch current mid-prices for both legs and compute unrealised P/L.
+    Returns a copy of pos enriched with current_spread_value, pl_pct,
+    pl_dollars, and dte_remaining.
+    """
+    from datetime import timedelta
+
+    expiry_str = pos.get("expiry", "")
+    dte_remaining = None
+    try:
+        dte_remaining = (date.fromisoformat(expiry_str) - date.today()).days
+    except Exception:
+        pass
+
+    long_contract  = pos.get("long_contract",  "")
+    short_contract = pos.get("short_contract", "")
+    net_debit_val  = pos.get("net_debit", 0) or 0
+    qty            = pos.get("qty", 1)
+
+    long_mid = short_mid = None
+    try:
+        from alpaca.data.historical import OptionHistoricalDataClient
+        from alpaca.data.requests   import OptionSnapshotRequest
+        opt_client = OptionHistoricalDataClient(API_KEY, API_SECRET)
+        for symbol, slot in [(long_contract, "long"), (short_contract, "short")]:
+            try:
+                snaps = opt_client.get_option_snapshot(
+                    OptionSnapshotRequest(symbol_or_symbols=[symbol])
+                )
+                snap = snaps.get(symbol)
+                if snap and snap.latest_quote:
+                    b = snap.latest_quote.bid_price
+                    a = snap.latest_quote.ask_price
+                    if b is not None and a is not None:
+                        mid = (float(b) + float(a)) / 2
+                        if slot == "long":
+                            long_mid = round(mid, 3)
+                        else:
+                            short_mid = round(mid, 3)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    current_spread_value = pl_pct = pl_dollars = None
+    if long_mid is not None and short_mid is not None:
+        current_spread_value = round(long_mid - short_mid, 3)
+        if net_debit_val > 0:
+            pl_pct     = round((current_spread_value - net_debit_val) / net_debit_val, 4)
+            pl_dollars = round((current_spread_value - net_debit_val) * 100 * qty, 2)
+
+    return {
+        **pos,
+        "current_long_mid":     long_mid,
+        "current_short_mid":    short_mid,
+        "current_spread_value": current_spread_value,
+        "pl_pct":               pl_pct,
+        "pl_dollars":           pl_dollars,
+        "dte_remaining":        dte_remaining,
+    }
+
+
+def _bcs_check_exit(pos_pl: dict, settings: dict) -> Optional[str]:
+    """
+    Evaluate the three exit rules against a position that already has P/L data.
+    Returns a human-readable reason string, or None if no exit is warranted.
+    """
+    profit_target = settings.get("profit_target_pct", 0.50)
+    stop_loss     = settings.get("stop_loss_pct",     0.50)
+    time_stop     = settings.get("time_stop_dte",     21)
+
+    pl_pct        = pos_pl.get("pl_pct")
+    dte_remaining = pos_pl.get("dte_remaining")
+
+    if pl_pct is not None and pl_pct >= profit_target:
+        return f"profit_target (+{round(pl_pct * 100, 1)}% ≥ +{int(profit_target * 100)}%)"
+    if pl_pct is not None and pl_pct <= -stop_loss:
+        return f"stop_loss ({round(pl_pct * 100, 1)}% ≤ -{int(stop_loss * 100)}%)"
+    if dte_remaining is not None and dte_remaining <= time_stop:
+        return f"time_stop ({dte_remaining} DTE ≤ {time_stop} DTE)"
+    return None
+
+
+def _bcs_close_spread(pos: dict, trading_client) -> dict:
+    """
+    Place market orders to close both legs:
+      - Sell-to-close the long call
+      - Buy-to-close the short call
+    """
+    from alpaca.trading.requests import MarketOrderRequest
+    from alpaca.trading.enums    import OrderSide, TimeInForce
+
+    errors, submitted = [], []
+    qty = pos.get("qty", 1)
+
+    for symbol, side, label in [
+        (pos["long_contract"],  OrderSide.SELL, "long"),
+        (pos["short_contract"], OrderSide.BUY,  "short"),
+    ]:
+        try:
+            trading_client.submit_order(MarketOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=side,
+                time_in_force=TimeInForce.DAY,
+            ))
+            submitted.append(label)
+        except Exception as e:
+            errors.append(f"close {label} ({symbol}): {e}")
+
+    return {"success": len(errors) == 0, "submitted": submitted, "errors": errors}
+
+
+# ── BCS API endpoints ──────────────────────────────────────────────────────────
+
+@app.get("/api/bcs/settings")
+def get_bcs_settings():
+    """Return current bull call spread strategy parameters."""
+    return _load_bcs_settings()
+
+
+@app.post("/api/bcs/settings")
+def save_bcs_settings(settings: BullCallSpreadSettings):
+    """Persist bull call spread strategy parameters."""
+    data = settings.model_dump()
+    _save_bcs_settings(data)
+    return {"message": "BCS settings saved.", **data}
+
+
+class BCSScanRequest(BaseModel):
+    tickers: Optional[List[str]] = None   # when set, scan only these tickers
+
+
+@app.post("/api/bcs/scan")
+def run_bcs_scan(req: Optional[BCSScanRequest] = None):
+    """
+    Scan for bull call spread entry candidates.
+    Optional body: {"tickers": ["AAPL", "NVDA", ...]} to scope the scan to a
+    specific list (e.g. the Screener watchlist).  Omit the body to scan the
+    full universe defined in BCS settings.
+    """
+    settings = _load_bcs_settings()
+    override = (req.tickers if req and req.tickers else None)
+    try:
+        result = _bcs_scan(settings, tickers_override=override)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"BCS scan error: {e}")
+    return result
+
+
+@app.get("/api/bcs/positions")
+def get_bcs_positions():
+    """
+    Return all open BCS positions enriched with live P/L data and
+    exit-condition flags so the dashboard can display them correctly.
+    """
+    state    = _load_bcs_state()
+    settings = _load_bcs_settings()
+    open_pos = [p for p in state.get("positions", []) if p.get("status") == "open"]
+
+    enriched = []
+    for pos in open_pos:
+        try:
+            pos_pl      = _bcs_get_position_pl(pos)
+            exit_signal = _bcs_check_exit(pos_pl, settings)
+            pos_pl["exit_signal"] = exit_signal
+            enriched.append(pos_pl)
+        except Exception as e:
+            enriched.append({**pos, "error": str(e), "exit_signal": None})
+
+    return {"positions": enriched}
+
+
+@app.post("/api/bcs/monitor")
+def monitor_bcs_positions():
+    """
+    Check every open BCS position for profit-target, stop-loss, or time-stop
+    triggers. Closes qualifying positions via market orders and updates state.
+    Safe to call repeatedly — idempotent on already-closed positions.
+    """
+    state    = _load_bcs_state()
+    settings = _load_bcs_settings()
+    positions = state.get("positions", [])
+
+    closed, errors = [], []
+    trading_client = None
+
+    for i, pos in enumerate(positions):
+        if pos.get("status") != "open":
+            continue
+        try:
+            pos_pl = _bcs_get_position_pl(pos)
+            reason = _bcs_check_exit(pos_pl, settings)
+            if not reason:
+                continue
+
+            if trading_client is None:
+                trading_client = _get_trading_client()
+
+            result = _bcs_close_spread(pos, trading_client)
+            positions[i]["status"]      = "closed"
+            positions[i]["exit_reason"] = reason
+            positions[i]["exit_date"]   = _today_key()
+            closed.append({
+                "id":          pos["id"],
+                "ticker":      pos["ticker"],
+                "exit_reason": reason,
+                "result":      result,
+            })
+        except Exception as e:
+            errors.append(f"{pos.get('ticker', '?')} ({pos.get('id', '?')}): {e}")
+
+    if closed:
+        state["positions"] = positions
+        _save_bcs_state(state)
+
+    return {
+        "closed":     closed,
+        "errors":     errors,
+        "open_count": sum(1 for p in positions if p.get("status") == "open"),
+    }
+
+
+class BCSPlaceRequest(BaseModel):
+    ticker:         str
+    long_contract:  str
+    short_contract: str
+    long_strike:    float
+    short_strike:   float
+    expiry:         str
+    net_debit:      float
+    long_ask:       Optional[float] = None   # limit price for the long leg
+    short_bid:      Optional[float] = None   # limit price for the short leg
+    qty:            Optional[int]   = None   # overrides settings.qty when set
+
+
+@app.post("/api/bcs/place")
+def place_bcs_spread(req: BCSPlaceRequest):
+    """
+    Place a bull call spread from a scan candidate.
+    Validates that the total debit does not exceed max_debit_pct × portfolio value
+    before submitting orders, then records the position in bcs_state.json.
+    """
+    import uuid
+    from alpaca.trading.requests import LimitOrderRequest
+    from alpaca.trading.enums    import OrderSide, TimeInForce
+
+    settings      = _load_bcs_settings()
+    qty           = req.qty if req.qty is not None else settings.get("qty", 1)
+    max_debit_pct = settings.get("max_debit_pct", 0.02)
+
+    trading_client = _get_trading_client()
+
+    try:
+        account         = trading_client.get_account()
+        portfolio_value = float(account.portfolio_value)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Cannot fetch account balance: {e}")
+
+    total_debit = req.net_debit * qty * 100      # per share × contracts × multiplier
+    max_allowed = portfolio_value * max_debit_pct
+    if total_debit > max_allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Net debit ${total_debit:.2f} exceeds the {max_debit_pct * 100:.1f}% "
+                f"portfolio cap (${max_allowed:.2f}). Trade skipped."
+            ),
+        )
+
+    # Limit prices — use provided ask/bid or fall back to a safe approximation
+    long_limit  = round(req.long_ask  or req.net_debit * 1.05, 2)
+    short_limit = round(max(req.short_bid or 0.05, 0.01), 2)
+
+    try:
+        trading_client.submit_order(LimitOrderRequest(
+            symbol=req.long_contract,
+            qty=qty,
+            side=OrderSide.BUY,
+            time_in_force=TimeInForce.DAY,
+            limit_price=long_limit,
+        ))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Long leg submission failed: {e}")
+
+    short_warnings = []
+    try:
+        trading_client.submit_order(LimitOrderRequest(
+            symbol=req.short_contract,
+            qty=qty,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+            limit_price=short_limit,
+        ))
+    except Exception as e:
+        short_warnings.append(f"Short leg submission failed: {e}")
+
+    # Record the new position regardless of whether the short leg filled
+    state = _load_bcs_state()
+    new_pos = {
+        "id":             str(uuid.uuid4())[:8],
+        "ticker":         req.ticker.upper(),
+        "long_contract":  req.long_contract,
+        "short_contract": req.short_contract,
+        "long_strike":    req.long_strike,
+        "short_strike":   req.short_strike,
+        "expiry":         req.expiry,
+        "qty":            qty,
+        "net_debit":      req.net_debit,
+        "debit_paid":     round(total_debit, 2),
+        "entry_date":     _today_key(),
+        "status":         "open",
+        "exit_reason":    None,
+        "exit_date":      None,
+    }
+    state.setdefault("positions", []).append(new_pos)
+    _save_bcs_state(state)
+
+    return {
+        "message":        f"Bull call spread opened on {req.ticker}.",
+        "id":             new_pos["id"],
+        "long_contract":  req.long_contract,
+        "short_contract": req.short_contract,
+        "qty":            qty,
+        "net_debit":      req.net_debit,
+        "total_debit":    round(total_debit, 2),
+        "warnings":       short_warnings,
+    }
+
+
+@app.delete("/api/bcs/positions/{position_id}")
+def close_bcs_position_manually(position_id: str):
+    """Manually close an open BCS position by its ID (market orders on both legs)."""
+    state     = _load_bcs_state()
+    positions = state.get("positions", [])
+    pos       = next(
+        (p for p in positions if p.get("id") == position_id and p.get("status") == "open"),
+        None,
+    )
+    if pos is None:
+        raise HTTPException(status_code=404, detail=f"Open position '{position_id}' not found.")
+
+    trading_client = _get_trading_client()
+    result = _bcs_close_spread(pos, trading_client)
+
+    for p in positions:
+        if p.get("id") == position_id:
+            p["status"]      = "closed"
+            p["exit_reason"] = "manual"
+            p["exit_date"]   = _today_key()
+
+    state["positions"] = positions
+    _save_bcs_state(state)
+
+    return {"message": f"Position {position_id} closed.", "result": result}
+
+
+
+# ── Bear Put Spread Strategy ───────────────────────────────────────────────────
+
+BPS_SETTINGS_FILE = BOT_DIR / "bps_settings.json"
+BPS_STATE_FILE    = BOT_DIR / "bps_state.json"
+
+
+class BearPutSpreadSettings(BaseModel):
+    enabled:           bool  = True
+    universe:          str   = "usa"
+    price_min:         float = 50.0
+    price_max:         float = 200.0
+    spread_width_pct:  float = 0.075   # short strike = stock * (1 - this)
+    dte_min:           int   = 30
+    dte_max:           int   = 45
+    prefer_monthly:    bool  = True
+    max_debit_pct:     float = 0.02
+    qty:               int   = 1
+    profit_target_pct: float = 0.50
+    stop_loss_pct:     float = 0.50
+    time_stop_dte:     int   = 21
+    poll_seconds:      int   = 300
+
+
+# ── BPS file helpers ───────────────────────────────────────────────────────────
+
+def _load_bps_settings() -> dict:
+    if not BPS_SETTINGS_FILE.exists():
+        return BearPutSpreadSettings().model_dump()
+    try:
+        return json.loads(BPS_SETTINGS_FILE.read_text())
+    except Exception:
+        return BearPutSpreadSettings().model_dump()
+
+
+def _save_bps_settings(s: dict):
+    BPS_SETTINGS_FILE.write_text(json.dumps(s, indent=2))
+
+
+def _load_bps_state() -> dict:
+    if not BPS_STATE_FILE.exists():
+        return {"positions": []}
+    try:
+        return json.loads(BPS_STATE_FILE.read_text())
+    except Exception:
+        return {"positions": []}
+
+
+def _save_bps_state(state: dict):
+    tmp = str(BPS_STATE_FILE) + ".tmp"
+    Path(tmp).write_text(json.dumps(state, indent=2))
+    os.replace(tmp, BPS_STATE_FILE)
+
+
+# ── BPS strategy helpers ───────────────────────────────────────────────────────
+
+def _bps_is_bearish_trend(bars: list) -> bool:
+    """
+    Returns True when:
+      1. Current close < SMA20
+      2. Current close < SMA50
+      3. Most recent 10-day window shows a lower high AND a lower low
+         vs. the prior 10-day window  (= making LH/LL on daily chart).
+    """
+    if len(bars) < 55:
+        return False
+
+    closes = [b["c"] for b in bars]
+    sma20_vals = _sma(closes, 20)
+    sma50_vals = _sma(closes, 50)
+
+    def last(lst):
+        return next((v for v in reversed(lst) if v is not None), None)
+
+    sma20 = last(sma20_vals)
+    sma50 = last(sma50_vals)
+    price = closes[-1]
+
+    if sma20 is None or sma50 is None:
+        return False
+    if price >= sma20 or price >= sma50:
+        return False
+
+    recent_high = max(b["h"] for b in bars[-10:])
+    recent_low  = min(b["l"] for b in bars[-10:])
+    prior_high  = max(b["h"] for b in bars[-20:-10])
+    prior_low   = min(b["l"] for b in bars[-20:-10])
+
+    return recent_high < prior_high and recent_low < prior_low
+
+
+def _bps_detect_entry_trigger(bars: list) -> tuple:
+    """
+    Detects: dead-cat bounce toward SMA20 resistance →
+             green candle high within 3 % of SMA20 (approaching resistance) →
+             red rejection candle with above-average volume.
+
+    Returns (triggered: bool, details: dict | None).
+    """
+    if len(bars) < 25:
+        return False, None
+
+    closes  = [b["c"] for b in bars]
+    volumes = [b["v"] for b in bars]
+    sma20_vals = _sma(closes, 20)
+
+    def last(lst):
+        return next((v for v in reversed(lst) if v is not None), None)
+
+    sma20 = last(sma20_vals)
+    if sma20 is None:
+        return False, None
+
+    avg_vol = sum(volumes[-21:-1]) / 20 if len(volumes) >= 21 else sum(volumes) / max(len(volumes), 1)
+
+    # green_bar = bounce candle (approaches SMA20 resistance)
+    # red_bar   = rejection candle that follows
+    for lookback in range(1, 4):
+        if lookback + 1 > len(bars):
+            continue
+        green_bar = bars[-(lookback + 1)]
+        red_bar   = bars[-lookback]
+
+        is_green = green_bar["c"] > green_bar["o"]
+        is_red   = red_bar["c"]   < red_bar["o"]
+        if not (is_green and is_red):
+            continue
+
+        near_resistance = abs(green_bar["h"] - sma20) / sma20 <= 0.03
+        strong_volume   = red_bar.get("v", 0) > avg_vol
+
+        if near_resistance and strong_volume:
+            return True, {
+                "green_candle": {
+                    "date":  green_bar.get("t", "")[:10],
+                    "open":  green_bar["o"],
+                    "close": green_bar["c"],
+                    "high":  green_bar["h"],
+                },
+                "red_candle": {
+                    "date":   red_bar.get("t", "")[:10],
+                    "open":   red_bar["o"],
+                    "close":  red_bar["c"],
+                    "volume": red_bar["v"],
+                },
+                "sma20":      round(sma20, 2),
+                "avg_volume": round(avg_vol),
+            }
+
+    return False, None
+
+
+def _bps_find_strikes(chain: list, stock_price: float, spread_width_pct: float) -> tuple:
+    """
+    From a list of put option contracts (single expiry), pick:
+      long  strike → ATM (closest to stock_price)            — the higher strike
+      short strike → closest to stock_price * (1 - spread_width_pct) — the lower strike
+
+    Returns (long_contract_dict, short_contract_dict) or (None, None) on failure.
+    """
+    puts = [c for c in chain if c.get("type") == "put" and c.get("strike") is not None]
+    if not puts:
+        return None, None
+
+    puts.sort(key=lambda c: c["strike"])
+    long_item    = min(puts, key=lambda c: abs(c["strike"] - stock_price))
+    short_target = stock_price * (1.0 - spread_width_pct)
+    short_item   = min(puts, key=lambda c: abs(c["strike"] - short_target))
+
+    # Guarantee short strike is strictly below long strike
+    if short_item["strike"] >= long_item["strike"]:
+        below = [c for c in puts if c["strike"] < long_item["strike"]]
+        if not below:
+            return long_item, None
+        short_item = below[-1]
+
+    return long_item, short_item
+
+
+def _bps_scan(settings: dict, tickers_override: Optional[List[str]] = None) -> dict:
+    """
+    Bear put spread scanner:
+      1. Pull daily bars for the chosen universe (or tickers_override list).
+      2. Filter by price range, bearish trend, and rejection-at-resistance trigger.
+      3. For each candidate, fetch the put chain and construct the spread.
+    """
+    universe         = settings.get("universe", "usa")
+    price_min        = settings.get("price_min", 50.0)
+    price_max        = settings.get("price_max", 200.0)
+    dte_min          = settings.get("dte_min", 30)
+    dte_max          = settings.get("dte_max", 45)
+    prefer_monthly   = settings.get("prefer_monthly", True)
+    spread_width_pct = settings.get("spread_width_pct", 0.075)
+    qty              = settings.get("qty", 1)
+
+    if tickers_override:
+        tickers = [t.upper().strip() for t in tickers_override if t.strip()]
+    else:
+        tickers = list(STOCK_UNIVERSES.get(universe, STOCK_UNIVERSES["usa"]))
+
+    bars_map      = _fetch_multi_bars(tickers, 120)
+    target_expiry = _bcs_find_expiry(dte_min, dte_max, prefer_monthly)  # reuse — same logic
+
+    candidates, errors = [], []
+
+    for ticker in tickers:
+        bars = bars_map.get(ticker, [])
+        if len(bars) < 55:
+            continue
+
+        price = bars[-1]["c"]
+        if not (price_min <= price <= price_max):
+            continue
+
+        if not _bps_is_bearish_trend(bars):
+            continue
+
+        triggered, trigger_details = _bps_detect_entry_trigger(bars)
+        if not triggered:
+            continue
+
+        try:
+            chain = _get_option_chain(
+                underlying=ticker,
+                expiry_date=target_expiry,
+                option_type="put",
+                strike_gte=round(price * 0.80, 2),
+                strike_lte=round(price * 1.05, 2),
+            )
+        except Exception as e:
+            errors.append(f"{ticker}: option chain error — {e}")
+            continue
+
+        if not chain:
+            errors.append(f"{ticker}: no puts found for expiry {target_expiry}")
+            continue
+
+        long_item, short_item = _bps_find_strikes(chain, price, spread_width_pct)
+        if long_item is None or short_item is None:
+            errors.append(f"{ticker}: could not find suitable put strikes")
+            continue
+
+        net_debit = _bcs_net_debit(long_item, short_item)  # formula identical
+        if net_debit is None or net_debit <= 0:
+            errors.append(f"{ticker}: invalid net debit ({net_debit})")
+            continue
+
+        if long_item.get("bid") is None or short_item.get("ask") is None:
+            errors.append(f"{ticker}: insufficient option liquidity")
+            continue
+
+        # Width = long strike − short strike (put spread is measured downward)
+        spread_width = round(long_item["strike"] - short_item["strike"], 2)
+        max_gain     = round((spread_width - net_debit) * 100, 2)
+        max_loss     = round(net_debit * 100, 2)
+        risk_reward  = round(max_gain / max_loss, 2) if max_loss > 0 else None
+        dte          = long_item.get("dte") or short_item.get("dte")
+
+        candidates.append({
+            "ticker":                  ticker,
+            "price":                   round(price, 2),
+            "expiry":                  target_expiry,
+            "dte":                     dte,
+            "long_contract":           long_item["symbol"],
+            "short_contract":          short_item["symbol"],
+            "long_strike":             long_item["strike"],
+            "short_strike":            short_item["strike"],
+            "spread_width":            spread_width,
+            "long_bid":                long_item.get("bid"),
+            "long_ask":                long_item.get("ask"),
+            "short_bid":               short_item.get("bid"),
+            "short_ask":               short_item.get("ask"),
+            "net_debit":               net_debit,
+            "net_debit_total":         round(net_debit * 100 * qty, 2),
+            "max_gain_per_contract":   max_gain,
+            "max_loss_per_contract":   max_loss,
+            "risk_reward":             risk_reward,
+            "long_delta":              long_item.get("delta"),
+            "long_iv":                 long_item.get("iv"),
+            "long_volume":             long_item.get("volume"),
+            "short_volume":            short_item.get("volume"),
+            "trigger":                 trigger_details,
+        })
+
+    candidates.sort(key=lambda x: x.get("risk_reward") or 0, reverse=True)
+    return {
+        "candidates":    candidates,
+        "scanned":       len(tickers),
+        "matched":       len(candidates),
+        "target_expiry": target_expiry,
+        "errors":        errors[:20],
+    }
+
+
+def _bps_get_position_pl(pos: dict) -> dict:
+    """Fetch current mid-prices for both legs and compute unrealised P/L."""
+    expiry_str    = pos.get("expiry", "")
+    dte_remaining = None
+    try:
+        dte_remaining = (date.fromisoformat(expiry_str) - date.today()).days
+    except Exception:
+        pass
+
+    long_contract  = pos.get("long_contract",  "")
+    short_contract = pos.get("short_contract", "")
+    net_debit_val  = pos.get("net_debit", 0) or 0
+    qty            = pos.get("qty", 1)
+
+    long_mid = short_mid = None
+    try:
+        from alpaca.data.historical import OptionHistoricalDataClient
+        from alpaca.data.requests   import OptionSnapshotRequest
+        opt_client = OptionHistoricalDataClient(API_KEY, API_SECRET)
+        for symbol, slot in [(long_contract, "long"), (short_contract, "short")]:
+            try:
+                snaps = opt_client.get_option_snapshot(
+                    OptionSnapshotRequest(symbol_or_symbols=[symbol])
+                )
+                snap = snaps.get(symbol)
+                if snap and snap.latest_quote:
+                    b = snap.latest_quote.bid_price
+                    a = snap.latest_quote.ask_price
+                    if b is not None and a is not None:
+                        mid = (float(b) + float(a)) / 2
+                        if slot == "long":
+                            long_mid = round(mid, 3)
+                        else:
+                            short_mid = round(mid, 3)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    current_spread_value = pl_pct = pl_dollars = None
+    if long_mid is not None and short_mid is not None:
+        current_spread_value = round(long_mid - short_mid, 3)
+        if net_debit_val > 0:
+            pl_pct     = round((current_spread_value - net_debit_val) / net_debit_val, 4)
+            pl_dollars = round((current_spread_value - net_debit_val) * 100 * qty, 2)
+
+    return {
+        **pos,
+        "current_long_mid":     long_mid,
+        "current_short_mid":    short_mid,
+        "current_spread_value": current_spread_value,
+        "pl_pct":               pl_pct,
+        "pl_dollars":           pl_dollars,
+        "dte_remaining":        dte_remaining,
+    }
+
+
+def _bps_check_exit(pos_pl: dict, settings: dict) -> Optional[str]:
+    profit_target = settings.get("profit_target_pct", 0.50)
+    stop_loss     = settings.get("stop_loss_pct",     0.50)
+    time_stop     = settings.get("time_stop_dte",     21)
+    pl_pct        = pos_pl.get("pl_pct")
+    dte_remaining = pos_pl.get("dte_remaining")
+    if pl_pct is not None and pl_pct >= profit_target:
+        return f"profit_target (+{round(pl_pct * 100, 1)}% ≥ +{int(profit_target * 100)}%)"
+    if pl_pct is not None and pl_pct <= -stop_loss:
+        return f"stop_loss ({round(pl_pct * 100, 1)}% ≤ -{int(stop_loss * 100)}%)"
+    if dte_remaining is not None and dte_remaining <= time_stop:
+        return f"time_stop ({dte_remaining} DTE ≤ {time_stop} DTE)"
+    return None
+
+
+def _bps_close_spread(pos: dict, trading_client) -> dict:
+    """Sell-to-close the long put; buy-to-close the short put."""
+    from alpaca.trading.requests import MarketOrderRequest
+    from alpaca.trading.enums    import OrderSide, TimeInForce
+
+    errors, submitted = [], []
+    qty = pos.get("qty", 1)
+
+    for symbol, side, label in [
+        (pos["long_contract"],  OrderSide.SELL, "long"),
+        (pos["short_contract"], OrderSide.BUY,  "short"),
+    ]:
+        try:
+            trading_client.submit_order(MarketOrderRequest(
+                symbol=symbol, qty=qty, side=side, time_in_force=TimeInForce.DAY,
+            ))
+            submitted.append(label)
+        except Exception as e:
+            errors.append(f"close {label} ({symbol}): {e}")
+
+    return {"success": len(errors) == 0, "submitted": submitted, "errors": errors}
+
+
+# ── BPS API endpoints ──────────────────────────────────────────────────────────
+
+@app.get("/api/bps/settings")
+def get_bps_settings():
+    return _load_bps_settings()
+
+
+@app.post("/api/bps/settings")
+def save_bps_settings(settings: BearPutSpreadSettings):
+    data = settings.model_dump()
+    _save_bps_settings(data)
+    return {"message": "BPS settings saved.", **data}
+
+
+class BPSScanRequest(BaseModel):
+    tickers: Optional[List[str]] = None
+
+
+@app.post("/api/bps/scan")
+def run_bps_scan(req: Optional[BPSScanRequest] = None):
+    settings = _load_bps_settings()
+    override = (req.tickers if req and req.tickers else None)
+    try:
+        result = _bps_scan(settings, tickers_override=override)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"BPS scan error: {e}")
+    return result
+
+
+@app.get("/api/bps/positions")
+def get_bps_positions():
+    state    = _load_bps_state()
+    settings = _load_bps_settings()
+    open_pos = [p for p in state.get("positions", []) if p.get("status") == "open"]
+    enriched = []
+    for pos in open_pos:
+        try:
+            pos_pl      = _bps_get_position_pl(pos)
+            exit_signal = _bps_check_exit(pos_pl, settings)
+            pos_pl["exit_signal"] = exit_signal
+            enriched.append(pos_pl)
+        except Exception as e:
+            enriched.append({**pos, "error": str(e), "exit_signal": None})
+    return {"positions": enriched}
+
+
+@app.post("/api/bps/monitor")
+def monitor_bps_positions():
+    state     = _load_bps_state()
+    settings  = _load_bps_settings()
+    positions = state.get("positions", [])
+    closed, errors = [], []
+    trading_client = None
+    for i, pos in enumerate(positions):
+        if pos.get("status") != "open":
+            continue
+        try:
+            pos_pl = _bps_get_position_pl(pos)
+            reason = _bps_check_exit(pos_pl, settings)
+            if not reason:
+                continue
+            if trading_client is None:
+                trading_client = _get_trading_client()
+            result = _bps_close_spread(pos, trading_client)
+            positions[i]["status"]      = "closed"
+            positions[i]["exit_reason"] = reason
+            positions[i]["exit_date"]   = _today_key()
+            closed.append({"id": pos["id"], "ticker": pos["ticker"], "exit_reason": reason, "result": result})
+        except Exception as e:
+            errors.append(f"{pos.get('ticker', '?')} ({pos.get('id', '?')}): {e}")
+    if closed:
+        state["positions"] = positions
+        _save_bps_state(state)
+    return {
+        "closed":     closed,
+        "errors":     errors,
+        "open_count": sum(1 for p in positions if p.get("status") == "open"),
+    }
+
+
+class BPSPlaceRequest(BaseModel):
+    ticker:         str
+    long_contract:  str
+    short_contract: str
+    long_strike:    float
+    short_strike:   float
+    expiry:         str
+    net_debit:      float
+    long_ask:       Optional[float] = None
+    short_bid:      Optional[float] = None
+    qty:            Optional[int]   = None
+
+
+@app.post("/api/bps/place")
+def place_bps_spread(req: BPSPlaceRequest):
+    import uuid
+    from alpaca.trading.requests import LimitOrderRequest
+    from alpaca.trading.enums    import OrderSide, TimeInForce
+
+    settings       = _load_bps_settings()
+    qty            = req.qty if req.qty is not None else settings.get("qty", 1)
+    max_debit_pct  = settings.get("max_debit_pct", 0.02)
+    trading_client = _get_trading_client()
+
+    try:
+        account         = trading_client.get_account()
+        portfolio_value = float(account.portfolio_value)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Cannot fetch account balance: {e}")
+
+    total_debit = req.net_debit * qty * 100
+    max_allowed = portfolio_value * max_debit_pct
+    if total_debit > max_allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Net debit ${total_debit:.2f} exceeds the {max_debit_pct * 100:.1f}% "
+                f"portfolio cap (${max_allowed:.2f}). Trade skipped."
+            ),
+        )
+
+    long_limit  = round(req.long_ask  or req.net_debit * 1.05, 2)
+    short_limit = round(max(req.short_bid or 0.05, 0.01), 2)
+
+    try:
+        trading_client.submit_order(LimitOrderRequest(
+            symbol=req.long_contract, qty=qty, side=OrderSide.BUY,
+            time_in_force=TimeInForce.DAY, limit_price=long_limit,
+        ))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Long leg submission failed: {e}")
+
+    short_warnings = []
+    try:
+        trading_client.submit_order(LimitOrderRequest(
+            symbol=req.short_contract, qty=qty, side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY, limit_price=short_limit,
+        ))
+    except Exception as e:
+        short_warnings.append(f"Short leg submission failed: {e}")
+
+    state = _load_bps_state()
+    new_pos = {
+        "id":             str(uuid.uuid4())[:8],
+        "ticker":         req.ticker.upper(),
+        "long_contract":  req.long_contract,
+        "short_contract": req.short_contract,
+        "long_strike":    req.long_strike,
+        "short_strike":   req.short_strike,
+        "expiry":         req.expiry,
+        "qty":            qty,
+        "net_debit":      req.net_debit,
+        "debit_paid":     round(total_debit, 2),
+        "entry_date":     _today_key(),
+        "status":         "open",
+        "exit_reason":    None,
+        "exit_date":      None,
+    }
+    state.setdefault("positions", []).append(new_pos)
+    _save_bps_state(state)
+
+    return {
+        "message":        f"Bear put spread opened on {req.ticker}.",
+        "id":             new_pos["id"],
+        "long_contract":  req.long_contract,
+        "short_contract": req.short_contract,
+        "qty":            qty,
+        "net_debit":      req.net_debit,
+        "total_debit":    round(total_debit, 2),
+        "warnings":       short_warnings,
+    }
+
+
+@app.delete("/api/bps/positions/{position_id}")
+def close_bps_position_manually(position_id: str):
+    state     = _load_bps_state()
+    positions = state.get("positions", [])
+    pos       = next(
+        (p for p in positions if p.get("id") == position_id and p.get("status") == "open"),
+        None,
+    )
+    if pos is None:
+        raise HTTPException(status_code=404, detail=f"Open BPS position '{position_id}' not found.")
+    trading_client = _get_trading_client()
+    result = _bps_close_spread(pos, trading_client)
+    for p in positions:
+        if p.get("id") == position_id:
+            p["status"]      = "closed"
+            p["exit_reason"] = "manual"
+            p["exit_date"]   = _today_key()
+    state["positions"] = positions
+    _save_bps_state(state)
+    return {"message": f"BPS position {position_id} closed.", "result": result}
+
 
 # ── Health ────────────────────────────────────────────────────────────────────
 @app.get("/health")

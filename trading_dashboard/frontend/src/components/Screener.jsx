@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react"
-import { Search, X, Plus, AlertTriangle, ChevronUp, ChevronDown, ArrowRight, TrendingUp, Loader2, Bookmark, GripVertical, Trash2 } from "lucide-react"
+import { Search, X, Plus, AlertTriangle, ChevronUp, ChevronDown, ArrowRight, TrendingUp, TrendingDown, Loader2, Bookmark, GripVertical, Trash2 } from "lucide-react"
 import "./Screener.css"
 
 const API = "/api"
@@ -928,7 +928,7 @@ function OptionsChain({ symbol, stockPrice }) {
       )}
 
       {/* Add to Plan modal — pre-populate with selected contract */}
-      {selected && <AddToPlanModal contract={selected} onClose={function(){setSelected(null)}}/>}
+      {selected && <AddToPlanModal contract={selected} chain={chain} onClose={function(){setSelected(null)}}/>}
     </div>
   )
 }
@@ -1107,12 +1107,66 @@ function ResultsCard({ results, errors, tickers_scanned, cols, onAdd, addLabel, 
 // ── Options: Add to Plan modal ────────────────────────────────────────────────
 // ChainAddPanel — renders inline inside the chain panel, not as a modal overlay.
 // This keeps the chart above fully interactive while filling in SL/TP.
-function ChainAddPanel({ contract, onClose }) {
+function ChainAddPanel({ contract, chain, onClose }) {
   var qs=useState(1);    var qty=qs[0];  var setQty=qs[1]
   var ss=useState("");   var sl=ss[0];   var setSl=ss[1]
   var ts=useState("");   var tp=ts[0];   var setTp=ts[1]
   var ms=useState(null); var msg=ms[0];  var setMsg=ms[1]
   var bs=useState(false);var busy=bs[0]; var setBusy=bs[1]
+
+  var isCall = contract.type === "call"
+  var isPut  = contract.type === "put"
+  var defaultMode = isCall ? "spread" : isPut ? "bearspread" : "single"
+  var md=useState(defaultMode); var mode=md[0]; var setMode=md[1]
+  var shs=useState(""); var selectedShortStrike=shs[0]; var setSelectedShortStrike=shs[1]
+
+  var longStrike = parseFloat(contract.strike)
+
+  // ── Bull spread leg candidates (calls above long strike) ──────────────────
+  var callsAbove = (chain||[])
+    .filter(function(c){ return c.type==="call" && c.expiry===contract.expiry && parseFloat(c.strike) > longStrike })
+    .sort(function(a,b){ return parseFloat(a.strike) - parseFloat(b.strike) })
+  var targetShort = longStrike * 1.075
+  var autoShort = callsAbove.reduce(function(best, c) {
+    if (!best) return c
+    return Math.abs(parseFloat(c.strike) - targetShort) < Math.abs(parseFloat(best.strike) - targetShort) ? c : best
+  }, null)
+  var shortContract = selectedShortStrike
+    ? (callsAbove.find(function(c){ return String(c.strike) === selectedShortStrike }) || autoShort)
+    : autoShort
+
+  // Bull spread metrics
+  var longAsk   = contract.ask  != null ? parseFloat(contract.ask)  : null
+  var shortBid  = shortContract && shortContract.bid != null ? parseFloat(shortContract.bid) : null
+  var netDebit  = (longAsk != null && shortBid != null) ? parseFloat(Math.max(0, longAsk - shortBid).toFixed(2)) : null
+  var width     = shortContract ? parseFloat((parseFloat(shortContract.strike) - longStrike).toFixed(2)) : null
+  var maxGain   = (netDebit != null && width != null) ? Math.round((width - netDebit) * 100) : null
+  var maxLoss   = netDebit != null ? Math.round(netDebit * 100) : null
+  var breakeven = netDebit != null ? (longStrike + netDebit).toFixed(2) : null
+  var rr        = (maxGain != null && maxLoss != null && maxLoss > 0) ? (maxGain / maxLoss).toFixed(2) : null
+
+  // ── Bear spread leg candidates (puts below long strike) ───────────────────
+  var putsBelow = (chain||[])
+    .filter(function(c){ return c.type==="put" && c.expiry===contract.expiry && parseFloat(c.strike) < longStrike })
+    .sort(function(a,b){ return parseFloat(b.strike) - parseFloat(a.strike) }) // desc — closest first
+  var bearTargetShort = longStrike * 0.925
+  var bearAutoShort = putsBelow.reduce(function(best, c) {
+    if (!best) return c
+    return Math.abs(parseFloat(c.strike) - bearTargetShort) < Math.abs(parseFloat(best.strike) - bearTargetShort) ? c : best
+  }, null)
+  var bearShortContract = selectedShortStrike && mode === "bearspread"
+    ? (putsBelow.find(function(c){ return String(c.strike) === selectedShortStrike }) || bearAutoShort)
+    : bearAutoShort
+
+  // Bear spread metrics
+  var bearLongAsk  = contract.ask != null ? parseFloat(contract.ask) : null
+  var bearShortBid = bearShortContract && bearShortContract.bid != null ? parseFloat(bearShortContract.bid) : null
+  var bearNetDebit = (bearLongAsk != null && bearShortBid != null) ? parseFloat(Math.max(0, bearLongAsk - bearShortBid).toFixed(2)) : null
+  var bearWidth    = bearShortContract ? parseFloat((longStrike - parseFloat(bearShortContract.strike)).toFixed(2)) : null
+  var bearMaxGain  = (bearNetDebit != null && bearWidth != null) ? Math.round((bearWidth - bearNetDebit) * 100) : null
+  var bearMaxLoss  = bearNetDebit != null ? Math.round(bearNetDebit * 100) : null
+  var bearBreakeven= bearNetDebit != null ? (longStrike - bearNetDebit).toFixed(2) : null
+  var bearRR       = (bearMaxGain != null && bearMaxLoss != null && bearMaxLoss > 0) ? (bearMaxGain / bearMaxLoss).toFixed(2) : null
 
   async function save() {
     if (!sl || parseFloat(sl) <= 0) { setMsg("Error: Stop Loss is required"); return }
@@ -1130,6 +1184,36 @@ function ChainAddPanel({ contract, onClose }) {
     } catch(e){ setMsg("Error: "+e.message) } finally { setBusy(false) }
   }
 
+  async function placeSpread() {
+    var isBear = mode === "bearspread"
+    var sc   = isBear ? bearShortContract : shortContract
+    var nd   = isBear ? bearNetDebit      : netDebit
+    var lAsk = isBear ? bearLongAsk       : longAsk
+    var sBid = isBear ? bearShortBid      : shortBid
+    var endpoint = isBear ? "/api/bps/place" : "/api/bcs/place"
+    if (!sc) { setMsg("Error: No short leg available at this expiry"); return }
+    if (nd == null || nd <= 0) { setMsg("Error: Could not compute net debit (check bid/ask)"); return }
+    setBusy(true)
+    try {
+      var body = {
+        ticker:         contract.underlying,
+        long_contract:  contract.symbol,
+        short_contract: sc.symbol,
+        long_strike:    longStrike,
+        short_strike:   parseFloat(sc.strike),
+        expiry:         contract.expiry,
+        net_debit:      nd,
+        long_ask:       lAsk,
+        short_bid:      sBid,
+      }
+      var res = await fetch(endpoint, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) })
+      var data = await res.json()
+      if (!res.ok) throw new Error(data.detail || res.statusText)
+      setMsg("✓ Spread placed! Cost: $" + (data.total_debit != null ? parseFloat(data.total_debit).toFixed(2) : (nd * 100).toFixed(2)))
+      setTimeout(function(){ setMsg(null); onClose() }, 3000)
+    } catch(e){ setMsg("Error: "+e.message) } finally { setBusy(false) }
+  }
+
   return (
     <div className="chain-add-panel">
       <div className="chain-add-hd">
@@ -1144,35 +1228,254 @@ function ChainAddPanel({ contract, onClose }) {
         </div>
         <button className="btn btn-ghost" style={{padding:"4px 10px",fontSize:13}} onClick={onClose}>✕</button>
       </div>
+
+      {/* Mode tabs */}
+      <div className="chain-mode-tabs">
+        <button className={"chain-mode-tab"+(mode==="single"?" active":"")} onClick={function(){setMode("single")}}>Single Leg</button>
+        {isCall && <button className={"chain-mode-tab"+(mode==="spread"?" active":"")} onClick={function(){setMode("spread")}}>Bull Spread</button>}
+        {isPut  && <button className={"chain-mode-tab chain-mode-tab-bear"+(mode==="bearspread"?" active":"")} onClick={function(){setMode("bearspread")}}>Bear Spread</button>}
+      </div>
+
       <div className="chain-add-body">
-        <div className="chain-add-fields">
-          <div className="form-group">
-            <label>Quantity</label>
-            <input type="number" min="1" value={qty} onChange={function(e){setQty(e.target.value)}}/>
+
+        {/* ── Single-leg mode ── */}
+        {mode === "single" && (
+          <div className="chain-add-fields">
+            <div className="form-group">
+              <label>Quantity</label>
+              <input type="number" min="1" value={qty} onChange={function(e){setQty(e.target.value)}}/>
+            </div>
+            <div className="form-group">
+              <label>Stop Loss (stock $)</label>
+              <input type="number" step="0.01" placeholder="e.g. 185.00" value={sl} onChange={function(e){setSl(e.target.value)}}/>
+            </div>
+            <div className="form-group">
+              <label>Take Profit (stock $)</label>
+              <input type="number" step="0.01" placeholder="e.g. 200.00" value={tp} onChange={function(e){setTp(e.target.value)}}/>
+            </div>
+            <div style={{display:"flex",alignItems:"flex-end"}}>
+              <button className="btn btn-blue" style={{width:"100%",justifyContent:"center",height:38}} onClick={save} disabled={busy}>
+                <ArrowRight size={14}/> Add to Plans
+              </button>
+            </div>
           </div>
-          <div className="form-group">
-            <label>Stop Loss (stock $)</label>
-            <input type="number" step="0.01" placeholder="e.g. 185.00" value={sl} onChange={function(e){setSl(e.target.value)}}/>
+        )}
+
+        {/* ── Bull Spread mode ── */}
+        {mode === "spread" && (
+          <div>
+            <div className="chain-spread-legs">
+              {/* Long leg */}
+              <div className="chain-spread-leg chain-spread-leg-long">
+                <div className="chain-spread-leg-label">BUY · long</div>
+                <div className="mono" style={{fontSize:11,fontWeight:700,marginBottom:6,wordBreak:"break-all"}}>{contract.symbol}</div>
+                <div className="chain-spread-leg-row">
+                  <span className="dim">Strike</span>
+                  <span className="mono">${fmt(contract.strike)}</span>
+                </div>
+                <div className="chain-spread-leg-row">
+                  <span className="dim">Ask</span>
+                  <span className="mono">{longAsk!=null?"$"+fmt2(longAsk):"—"}</span>
+                </div>
+                {contract.delta != null && (
+                  <div className="chain-spread-leg-row">
+                    <span className="dim">Delta</span>
+                    <span className="mono">{parseFloat(contract.delta).toFixed(3)}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Short leg */}
+              <div className="chain-spread-leg chain-spread-leg-short">
+                <div className="chain-spread-leg-label">SELL · short</div>
+                <div className="mono" style={{fontSize:11,fontWeight:700,marginBottom:6,wordBreak:"break-all"}}>{shortContract ? shortContract.symbol : "—"}</div>
+                <div className="chain-spread-leg-row">
+                  <span className="dim">Strike</span>
+                  {callsAbove.length > 0 ? (
+                    <select
+                      className="chain-spread-strike-sel"
+                      value={selectedShortStrike || (autoShort ? String(autoShort.strike) : "")}
+                      onChange={function(e){ setSelectedShortStrike(e.target.value) }}
+                    >
+                      {callsAbove.map(function(c){
+                        return <option key={c.strike} value={String(c.strike)}>${fmt(c.strike)}</option>
+                      })}
+                    </select>
+                  ) : (
+                    <span className="mono dim">none</span>
+                  )}
+                </div>
+                <div className="chain-spread-leg-row">
+                  <span className="dim">Bid</span>
+                  <span className="mono">{shortBid!=null?"$"+fmt2(shortBid):"—"}</span>
+                </div>
+                {shortContract && shortContract.delta != null && (
+                  <div className="chain-spread-leg-row">
+                    <span className="dim">Delta</span>
+                    <span className="mono">{parseFloat(shortContract.delta).toFixed(3)}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Risk metrics */}
+            <div className="chain-spread-risk">
+              <div className="chain-spread-risk-cell">
+                <div className="dim mono" style={{fontSize:10}}>NET DEBIT</div>
+                <div className="mono amber">{netDebit!=null?"$"+fmt2(netDebit):"—"}</div>
+              </div>
+              <div className="chain-spread-risk-cell">
+                <div className="dim mono" style={{fontSize:10}}>BREAKEVEN</div>
+                <div className="mono">{breakeven!=null?"$"+breakeven:"—"}</div>
+              </div>
+              <div className="chain-spread-risk-cell">
+                <div className="dim mono" style={{fontSize:10}}>MAX GAIN</div>
+                <div className="mono green">{maxGain!=null?"$"+maxGain:"—"}</div>
+              </div>
+              <div className="chain-spread-risk-cell">
+                <div className="dim mono" style={{fontSize:10}}>MAX LOSS</div>
+                <div className="mono red">{maxLoss!=null?"$"+maxLoss:"—"}</div>
+              </div>
+              <div className="chain-spread-risk-cell">
+                <div className="dim mono" style={{fontSize:10}}>WIDTH</div>
+                <div className="mono">{width!=null?"$"+fmt2(width):"—"}</div>
+              </div>
+              <div className="chain-spread-risk-cell">
+                <div className="dim mono" style={{fontSize:10}}>R / R</div>
+                <div className="mono">{rr!=null?rr+"×":"—"}</div>
+              </div>
+            </div>
+
+            {/* Qty + Place */}
+            <div style={{display:"flex",gap:10,alignItems:"flex-end",marginTop:14}}>
+              <div className="form-group" style={{flex:"0 0 80px",marginBottom:0}}>
+                <label>Qty</label>
+                <input type="number" min="1" value={qty} onChange={function(e){setQty(e.target.value)}} style={{height:38}}/>
+              </div>
+              <button
+                className="btn btn-blue"
+                style={{flex:1,justifyContent:"center",height:38}}
+                onClick={placeSpread}
+                disabled={busy || !shortContract || netDebit==null || netDebit<=0}
+              >
+                {busy ? "Placing…" : "Place Bull Spread"}
+              </button>
+            </div>
           </div>
-          <div className="form-group">
-            <label>Take Profit (stock $)</label>
-            <input type="number" step="0.01" placeholder="e.g. 200.00" value={tp} onChange={function(e){setTp(e.target.value)}}/>
+        )}
+
+        {/* ── Bear Spread mode (puts only) ── */}
+        {mode === "bearspread" && (
+          <div>
+            <div className="chain-spread-legs">
+              {/* Long put (higher strike — BUY) */}
+              <div className="chain-spread-leg chain-spread-leg-long" style={{borderLeftColor:"var(--red-dim)"}}>
+                <div className="chain-spread-leg-label" style={{color:"var(--red-dim)"}}>BUY · long put</div>
+                <div className="mono" style={{fontSize:11,fontWeight:700,marginBottom:6,wordBreak:"break-all"}}>{contract.symbol}</div>
+                <div className="chain-spread-leg-row">
+                  <span className="dim">Strike</span>
+                  <span className="mono">${fmt(contract.strike)}</span>
+                </div>
+                <div className="chain-spread-leg-row">
+                  <span className="dim">Ask</span>
+                  <span className="mono">{bearLongAsk!=null?"$"+fmt2(bearLongAsk):"—"}</span>
+                </div>
+                {contract.delta != null && (
+                  <div className="chain-spread-leg-row">
+                    <span className="dim">Delta</span>
+                    <span className="mono">{parseFloat(contract.delta).toFixed(3)}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Short put (lower strike — SELL) */}
+              <div className="chain-spread-leg chain-spread-leg-short">
+                <div className="chain-spread-leg-label">SELL · short put</div>
+                <div className="mono" style={{fontSize:11,fontWeight:700,marginBottom:6,wordBreak:"break-all"}}>{bearShortContract ? bearShortContract.symbol : "—"}</div>
+                <div className="chain-spread-leg-row">
+                  <span className="dim">Strike</span>
+                  {putsBelow.length > 0 ? (
+                    <select
+                      className="chain-spread-strike-sel"
+                      value={selectedShortStrike || (bearAutoShort ? String(bearAutoShort.strike) : "")}
+                      onChange={function(e){ setSelectedShortStrike(e.target.value) }}
+                    >
+                      {putsBelow.map(function(c){
+                        return <option key={c.strike} value={String(c.strike)}>${fmt(c.strike)}</option>
+                      })}
+                    </select>
+                  ) : (
+                    <span className="mono dim">none</span>
+                  )}
+                </div>
+                <div className="chain-spread-leg-row">
+                  <span className="dim">Bid</span>
+                  <span className="mono">{bearShortBid!=null?"$"+fmt2(bearShortBid):"—"}</span>
+                </div>
+                {bearShortContract && bearShortContract.delta != null && (
+                  <div className="chain-spread-leg-row">
+                    <span className="dim">Delta</span>
+                    <span className="mono">{parseFloat(bearShortContract.delta).toFixed(3)}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Risk metrics */}
+            <div className="chain-spread-risk">
+              <div className="chain-spread-risk-cell">
+                <div className="dim mono" style={{fontSize:10}}>NET DEBIT</div>
+                <div className="mono amber">{bearNetDebit!=null?"$"+fmt2(bearNetDebit):"—"}</div>
+              </div>
+              <div className="chain-spread-risk-cell">
+                <div className="dim mono" style={{fontSize:10}}>BREAKEVEN</div>
+                <div className="mono">{bearBreakeven!=null?"$"+bearBreakeven:"—"}</div>
+              </div>
+              <div className="chain-spread-risk-cell">
+                <div className="dim mono" style={{fontSize:10}}>MAX GAIN</div>
+                <div className="mono green">{bearMaxGain!=null?"$"+bearMaxGain:"—"}</div>
+              </div>
+              <div className="chain-spread-risk-cell">
+                <div className="dim mono" style={{fontSize:10}}>MAX LOSS</div>
+                <div className="mono red">{bearMaxLoss!=null?"$"+bearMaxLoss:"—"}</div>
+              </div>
+              <div className="chain-spread-risk-cell">
+                <div className="dim mono" style={{fontSize:10}}>WIDTH</div>
+                <div className="mono">{bearWidth!=null?"$"+fmt2(bearWidth):"—"}</div>
+              </div>
+              <div className="chain-spread-risk-cell">
+                <div className="dim mono" style={{fontSize:10}}>R / R</div>
+                <div className="mono">{bearRR!=null?bearRR+"×":"—"}</div>
+              </div>
+            </div>
+
+            {/* Qty + Place */}
+            <div style={{display:"flex",gap:10,alignItems:"flex-end",marginTop:14}}>
+              <div className="form-group" style={{flex:"0 0 80px",marginBottom:0}}>
+                <label>Qty</label>
+                <input type="number" min="1" value={qty} onChange={function(e){setQty(e.target.value)}} style={{height:38}}/>
+              </div>
+              <button
+                className="btn"
+                style={{flex:1,justifyContent:"center",height:38,background:"var(--red-mute)",color:"var(--red)",border:"1px solid var(--red-dim)"}}
+                onClick={placeSpread}
+                disabled={busy || !bearShortContract || bearNetDebit==null || bearNetDebit<=0}
+              >
+                {busy ? "Placing…" : "Place Bear Spread"}
+              </button>
+            </div>
           </div>
-          <div style={{display:"flex",alignItems:"flex-end"}}>
-            <button className="btn btn-blue" style={{width:"100%",justifyContent:"center",height:38}} onClick={save} disabled={busy}>
-              <ArrowRight size={14}/> Add to Plans
-            </button>
-          </div>
-        </div>
-        {msg && <div className={"form-msg mono "+(msg.startsWith("Error")?"red":"green")} style={{marginTop:8}}>{msg}</div>}
+        )}
+
+        {msg && <div className={"form-msg mono "+(msg.startsWith("Error")?"red":"green")} style={{marginTop:10}}>{msg}</div>}
       </div>
     </div>
   )
 }
 
 // Keep AddToPlanModal name as alias so the Options screener tab still works
-function AddToPlanModal({ contract, onClose }) {
-  return <ChainAddPanel contract={contract} onClose={onClose}/>
+function AddToPlanModal({ contract, chain, onClose }) {
+  return <ChainAddPanel contract={contract} chain={chain} onClose={onClose}/>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1481,6 +1784,164 @@ function saveWatchlist(list) {
   try { localStorage.setItem(WATCHLIST_STORAGE_KEY, JSON.stringify(list)) } catch(e) {}
 }
 
+// ── Shared spread quick-builder ── (used by both BullSpreadPanel & BearSpreadPanel)
+function SpreadQuickPanel({ symbol, direction }) {
+  var isBull = direction === "bull"
+  var ss = useState(null);  var spread  = ss[0];  var setSpread  = ss[1]
+  var ls = useState(false); var loading = ls[0];  var setLoading = ls[1]
+  var es = useState(null);  var error   = es[0];  var setError   = es[1]
+  var ps = useState(false); var placing = ps[0];  var setPlacing = ps[1]
+  var ms = useState(null);  var msg     = ms[0];  var setMsg     = ms[1]
+
+  useEffect(function() {
+    setSpread(null); setError(null); setMsg(null)
+  }, [symbol, direction])
+
+  async function scan() {
+    setLoading(true); setError(null); setSpread(null); setMsg(null)
+    var endpoint = isBull ? "/api/bcs/scan" : "/api/bps/scan"
+    try {
+      var res  = await fetch(endpoint, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ tickers: [symbol] }) })
+      var data = await res.json()
+      if (!res.ok) throw new Error(data.detail || res.statusText)
+      var candidates = data.candidates || []
+      var match = candidates.find(function(c){ return c.ticker === symbol }) || candidates[0]
+      if (!match) throw new Error("No valid " + (isBull ? "bull call" : "bear put") + " spread found for " + symbol + " — check trend and liquidity data.")
+      setSpread(match)
+    } catch(e) { setError(e.message) } finally { setLoading(false) }
+  }
+
+  async function place() {
+    if (!spread) return
+    setPlacing(true)
+    var endpoint = isBull ? "/api/bcs/place" : "/api/bps/place"
+    try {
+      var body = {
+        ticker: spread.ticker, long_contract: spread.long_contract,
+        short_contract: spread.short_contract, long_strike: spread.long_strike,
+        short_strike: spread.short_strike, expiry: spread.expiry,
+        net_debit: spread.net_debit, long_ask: spread.long_ask, short_bid: spread.short_bid,
+      }
+      var res = await fetch(endpoint, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) })
+      var data = await res.json()
+      if (!res.ok) throw new Error(data.detail || res.statusText)
+      setMsg("✓ Spread placed! Cost: $" + (data.total_debit != null ? parseFloat(data.total_debit).toFixed(2) : (spread.net_debit * 100).toFixed(2)))
+      setTimeout(function(){ setMsg(null); setSpread(null) }, 4000)
+    } catch(e) { setMsg("Error: " + e.message) } finally { setPlacing(false) }
+  }
+
+  // breakeven: bull = long_strike + debit, bear = long_strike − debit
+  var be = spread && spread.long_strike != null && spread.net_debit != null
+    ? isBull
+      ? (spread.long_strike + spread.net_debit).toFixed(2)
+      : (spread.long_strike - spread.net_debit).toFixed(2)
+    : null
+
+  var accentColor = isBull ? "var(--green-dim)" : "var(--red-dim)"
+  var labelColor  = isBull ? "var(--green)"     : "var(--red)"
+  var longLabel   = isBull ? "BUY · long call"  : "BUY · long put"
+  var shortLabel  = isBull ? "SELL · short call" : "SELL · short put"
+  var placeBtnCls = isBull ? "btn btn-ghost" : "btn btn-ghost"  // ghost for both; accent via border
+
+  return (
+    <div className="wl-bcs-panel" style={{ borderLeftColor: accentColor }}>
+      <div className="wl-bcs-header">
+        <div className="mono" style={{fontWeight:600, fontSize:12, letterSpacing:"0.06em", color:"var(--text-2)"}}>
+          {isBull ? "BULL CALL SPREAD" : "BEAR PUT SPREAD"}
+        </div>
+        <button className="btn btn-ghost wl-bcs-scan-btn" onClick={scan} disabled={loading}>
+          {loading
+            ? <><Loader2 size={12} className="spin"/> Scanning…</>
+            : isBull
+              ? <><TrendingUp size={12}/> {spread ? "Rebuild" : "Build Spread"}</>
+              : <><TrendingDown size={12}/> {spread ? "Rebuild" : "Build Spread"}</>
+          }
+        </button>
+      </div>
+
+      {!spread && !loading && !error && (
+        <div className="mono dim wl-bcs-hint">
+          Click <strong>Build Spread</strong> to auto-select contracts and price a {isBull ? "bull call" : "bear put"} spread on {symbol}.
+        </div>
+      )}
+
+      {error && (
+        <div className="wl-bcs-error">
+          <AlertTriangle size={12}/> {error}
+        </div>
+      )}
+
+      {spread && (
+        <div className="wl-bcs-result">
+          <div className="wl-bcs-legs">
+            <div className="wl-bcs-leg" style={{ borderLeft: "3px solid " + accentColor }}>
+              <div className="wl-bcs-leg-label" style={{ color: labelColor }}>{longLabel}</div>
+              <div className="mono" style={{fontSize:12, fontWeight:700}}>${fmt(spread.long_strike)}</div>
+              <div className="mono dim" style={{fontSize:10, marginBottom:4}}>{spread.expiry} · {spread.dte} DTE</div>
+              <div className="mono dim" style={{fontSize:10, wordBreak:"break-all"}}>{spread.long_contract}</div>
+              <div className="mono amber" style={{fontSize:12, marginTop:4}}>ask ${fmt2(spread.long_ask)}</div>
+            </div>
+            <div className="wl-bcs-divider mono dim">→</div>
+            <div className="wl-bcs-leg" style={{ borderLeft: "3px solid var(--border-hi)" }}>
+              <div className="wl-bcs-leg-label" style={{ color: "var(--text-3)" }}>{shortLabel}</div>
+              <div className="mono" style={{fontSize:12, fontWeight:700}}>${fmt(spread.short_strike)}</div>
+              <div className="mono dim" style={{fontSize:10, marginBottom:4}}>{spread.expiry} · {spread.dte} DTE</div>
+              <div className="mono dim" style={{fontSize:10, wordBreak:"break-all"}}>{spread.short_contract}</div>
+              <div className="mono amber" style={{fontSize:12, marginTop:4}}>bid ${fmt2(spread.short_bid)}</div>
+            </div>
+          </div>
+
+          <div className="wl-bcs-risk">
+            <div className="wl-bcs-metric">
+              <span className="dim mono" style={{fontSize:9}}>NET DEBIT</span>
+              <span className="mono amber">${fmt2(spread.net_debit)}</span>
+            </div>
+            <div className="wl-bcs-metric">
+              <span className="dim mono" style={{fontSize:9}}>BREAKEVEN</span>
+              <span className="mono">{be ? "$"+be : "—"}</span>
+            </div>
+            <div className="wl-bcs-metric">
+              <span className="dim mono" style={{fontSize:9}}>MAX GAIN</span>
+              <span className="mono green">${fmt(spread.max_gain_per_contract, 0)}</span>
+            </div>
+            <div className="wl-bcs-metric">
+              <span className="dim mono" style={{fontSize:9}}>MAX LOSS</span>
+              <span className="mono red">${fmt(spread.max_loss_per_contract, 0)}</span>
+            </div>
+            <div className="wl-bcs-metric">
+              <span className="dim mono" style={{fontSize:9}}>DTE</span>
+              <span className="mono">{spread.dte ?? "—"}</span>
+            </div>
+            <div className="wl-bcs-metric">
+              <span className="dim mono" style={{fontSize:9}}>R / R</span>
+              <span className="mono">{spread.risk_reward != null ? spread.risk_reward+"×" : "—"}</span>
+            </div>
+          </div>
+
+          <button
+            className="btn wl-bcs-place-btn"
+            style={{ border: "1px solid " + accentColor, color: labelColor, background: "transparent" }}
+            onClick={place}
+            disabled={placing}
+          >
+            {placing ? "Placing…" : "Place " + (isBull ? "Bull" : "Bear") + " Spread"}
+          </button>
+        </div>
+      )}
+
+      {msg && (
+        <div className={"mono wl-bcs-msg " + (msg.startsWith("Error") ? "red" : "green")}>
+          {msg}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Bull / Bear spread panel wrappers ─────────────────────────────────────────
+function BullSpreadPanel({ symbol }) { return <SpreadQuickPanel symbol={symbol} direction="bull"/> }
+function BearSpreadPanel({ symbol }) { return <SpreadQuickPanel symbol={symbol} direction="bear"/> }
+
 function WatchlistScreener() {
   var wl  = useState(function(){ return loadWatchlist() }); var tickers=wl[0]; var setTickers=wl[1]
   var ai  = useState(""); var addInput=ai[0]; var setAddInput=ai[1]
@@ -1643,6 +2104,8 @@ function WatchlistScreener() {
         {selected ? (
           <>
             <StockChart symbol={selected} onClose={function(){ setSelIdx(-1) }}/>
+            <BullSpreadPanel symbol={selected}/>
+            <BearSpreadPanel symbol={selected}/>
             <OptionsChain symbol={selected} stockPrice={null}/>
           </>
         ) : (
