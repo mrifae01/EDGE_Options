@@ -7,7 +7,7 @@
   "dte_min": 30,
   "dte_max": 45,
   "prefer_monthly": true,
-  "max_debit_pct": 0.02,
+  "max_debit_pct": 0.1,
   "qty": 1,
   "profit_target_pct": 0.5,
   "stop_loss_pct": 0.5,

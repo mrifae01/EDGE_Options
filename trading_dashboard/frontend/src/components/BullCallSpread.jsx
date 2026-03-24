@@ -127,7 +127,7 @@ function SpreadDetail({ candidate, onPlace, onClose, placing }) {
         onClick={() => onPlace(c)}
         disabled={placing}
       >
-        {placing ? "Placing…" : "Place Spread"}
+        {placing ? "Adding…" : "Add to Plan"}
       </button>
     </div>
   )
@@ -245,7 +245,7 @@ export default function BullCallSpread() {
   async function handlePlace(candidate) {
     setPlacing(true)
     try {
-      const r = await api.placeBCSSpread({
+      await api.queueBCSSpread({
         ticker:         candidate.ticker,
         long_contract:  candidate.long_contract,
         short_contract: candidate.short_contract,
@@ -256,7 +256,7 @@ export default function BullCallSpread() {
         long_ask:       candidate.long_ask,
         short_bid:      candidate.short_bid,
       })
-      showToast(`${candidate.ticker} bull call spread placed. Total cost: $${r.total_debit}`)
+      showToast(`${candidate.ticker} added to plan — bot will place on next cycle.`)
       setSelected(null)
     } catch (e) {
       showToast(e.message, "error")

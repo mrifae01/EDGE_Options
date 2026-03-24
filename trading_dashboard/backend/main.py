@@ -3004,8 +3004,9 @@ def _bcs_detect_entry_trigger(bars: list) -> tuple:
 def _bcs_find_expiry(dte_min: int, dte_max: int, prefer_monthly: bool) -> str:
     """
     Return an expiry date string (YYYY-MM-DD) that falls inside [dte_min, dte_max].
-    When prefer_monthly is True, tries to land on the 3rd Friday of each month
-    before falling back to exactly dte_min days out.
+    When prefer_monthly is True, tries to land on the 3rd Friday of each month.
+    Falls back to the first Friday on or after dte_min days out (weekly expiry),
+    never returning a mid-week date that Alpaca would reject.
     """
     from datetime import timedelta
     today    = date.today()
@@ -3023,7 +3024,12 @@ def _bcs_find_expiry(dte_min: int, dte_max: int, prefer_monthly: bool) -> str:
             if min_date <= third_friday <= max_date:
                 return third_friday.isoformat()
 
-    return min_date.isoformat()
+    # Fallback: snap to the first Friday on or after min_date so we always
+    # land on a valid weekly expiry, never a mid-week non-expiry date.
+    candidate = min_date
+    while candidate.weekday() != 4:   # 4 = Friday
+        candidate += timedelta(days=1)
+    return candidate.isoformat()
 
 
 def _bcs_find_strikes(chain: list, stock_price: float, spread_width_pct: float) -> tuple:
@@ -3320,6 +3326,10 @@ class BCSScanRequest(BaseModel):
     tickers: Optional[List[str]] = None   # when set, scan only these tickers
 
 
+class BCSBuildRequest(BaseModel):
+    ticker: str   # single ticker — no trend / entry-trigger validation
+
+
 @app.post("/api/bcs/scan")
 def run_bcs_scan(req: Optional[BCSScanRequest] = None):
     """
@@ -3337,18 +3347,105 @@ def run_bcs_scan(req: Optional[BCSScanRequest] = None):
     return result
 
 
+@app.post("/api/bcs/build")
+def build_bcs_spread(req: BCSBuildRequest):
+    """
+    Build a bull call spread for a single ticker WITHOUT trend or entry-trigger
+    validation — useful for manual placement directly from the watchlist or
+    planner page.  Returns the same candidate schema as /api/bcs/scan so the
+    frontend can pass it straight to /api/bcs/place.
+    """
+    ticker   = req.ticker.upper().strip()
+    settings = _load_bcs_settings()
+
+    dte_min          = settings.get("dte_min", 30)
+    dte_max          = settings.get("dte_max", 45)
+    prefer_monthly   = settings.get("prefer_monthly", True)
+    spread_width_pct = settings.get("spread_width_pct", 0.075)
+    qty              = settings.get("qty", 1)
+
+    # Use the single-ticker endpoint — more reliable than the batch endpoint for one symbol
+    bars = _fetch_daily_bars(ticker, lookback=60)
+    if not bars:
+        raise HTTPException(status_code=404, detail=f"No price data found for {ticker}. Check that the ticker is valid and markets are accessible.")
+    price = bars[-1]["c"]
+
+    target_expiry = _bcs_find_expiry(dte_min, dte_max, prefer_monthly)
+
+    try:
+        chain = _get_option_chain(
+            underlying=ticker,
+            expiry_date=target_expiry,
+            option_type="call",
+            strike_gte=round(price * 0.88, 2),
+            strike_lte=round(price * 1.20, 2),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Option chain error for {ticker}: {e}")
+
+    if not chain:
+        raise HTTPException(status_code=404, detail=f"No calls found for {ticker} expiring {target_expiry}.")
+
+    long_item, short_item = _bcs_find_strikes(chain, price, spread_width_pct)
+    if long_item is None or short_item is None:
+        raise HTTPException(status_code=404, detail=f"Could not find suitable call strikes for {ticker}.")
+
+    net_debit = _bcs_net_debit(long_item, short_item)
+    if net_debit is None or net_debit <= 0:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid net debit ({net_debit}) for {ticker} — check option liquidity.",
+        )
+
+    spread_width = round(short_item["strike"] - long_item["strike"], 2)
+    max_gain     = round((spread_width - net_debit) * 100, 2)
+    max_loss     = round(net_debit * 100, 2)
+    risk_reward  = round(max_gain / max_loss, 2) if max_loss > 0 else None
+    dte          = long_item.get("dte") or short_item.get("dte")
+
+    return {
+        "ticker":                ticker,
+        "price":                 round(price, 2),
+        "expiry":                target_expiry,
+        "dte":                   dte,
+        "long_contract":         long_item["symbol"],
+        "short_contract":        short_item["symbol"],
+        "long_strike":           long_item["strike"],
+        "short_strike":          short_item["strike"],
+        "spread_width":          spread_width,
+        "long_bid":              long_item.get("bid"),
+        "long_ask":              long_item.get("ask"),
+        "short_bid":             short_item.get("bid"),
+        "short_ask":             short_item.get("ask"),
+        "net_debit":             net_debit,
+        "net_debit_total":       round(net_debit * 100 * qty, 2),
+        "max_gain_per_contract": max_gain,
+        "max_loss_per_contract": max_loss,
+        "risk_reward":           risk_reward,
+        "long_delta":            long_item.get("delta"),
+        "long_iv":               long_item.get("iv"),
+        "long_volume":           long_item.get("volume"),
+        "short_volume":          short_item.get("volume"),
+        "trigger":               None,
+    }
+
+
 @app.get("/api/bcs/positions")
 def get_bcs_positions():
     """
-    Return all open BCS positions enriched with live P/L data and
-    exit-condition flags so the dashboard can display them correctly.
+    Return all active (pending + open) BCS positions.
+    Pending positions are returned as-is (no live P/L — not yet filled).
+    Open positions are enriched with live P/L and exit-condition flags.
     """
     state    = _load_bcs_state()
     settings = _load_bcs_settings()
-    open_pos = [p for p in state.get("positions", []) if p.get("status") == "open"]
+    active   = [p for p in state.get("positions", []) if p.get("status") in ("open", "pending")]
 
     enriched = []
-    for pos in open_pos:
+    for pos in active:
+        if pos.get("status") == "pending":
+            enriched.append({**pos, "exit_signal": None})
+            continue
         try:
             pos_pl      = _bcs_get_position_pl(pos)
             exit_signal = _bcs_check_exit(pos_pl, settings)
@@ -3363,17 +3460,55 @@ def get_bcs_positions():
 @app.post("/api/bcs/monitor")
 def monitor_bcs_positions():
     """
-    Check every open BCS position for profit-target, stop-loss, or time-stop
-    triggers. Closes qualifying positions via market orders and updates state.
+    1. Place any pending BCS spreads (queued by the user via /api/bcs/queue).
+    2. Check every open BCS position for profit-target, stop-loss, or time-stop
+       triggers and close qualifying positions.
     Safe to call repeatedly — idempotent on already-closed positions.
     """
+    from alpaca.trading.requests import LimitOrderRequest
+    from alpaca.trading.enums    import OrderSide, TimeInForce
+
     state    = _load_bcs_state()
     settings = _load_bcs_settings()
     positions = state.get("positions", [])
 
-    closed, errors = [], []
+    placed, closed, errors = [], [], []
     trading_client = None
+    state_dirty = False
 
+    # ── Step 1: place pending entries ─────────────────────────────────────────
+    for i, pos in enumerate(positions):
+        if pos.get("status") != "pending":
+            continue
+        try:
+            if trading_client is None:
+                trading_client = _get_trading_client()
+
+            qty         = pos.get("qty", 1)
+            long_limit  = round(pos.get("long_ask") or pos["net_debit"] * 1.05, 2)
+            short_limit = round(max(pos.get("short_bid") or 0.05, 0.01), 2)
+
+            trading_client.submit_order(LimitOrderRequest(
+                symbol=pos["long_contract"],
+                qty=qty,
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY,
+                limit_price=long_limit,
+            ))
+            trading_client.submit_order(LimitOrderRequest(
+                symbol=pos["short_contract"],
+                qty=qty,
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.DAY,
+                limit_price=short_limit,
+            ))
+            positions[i]["status"] = "open"
+            placed.append(pos["ticker"])
+            state_dirty = True
+        except Exception as e:
+            errors.append(f"Entry {pos.get('ticker', '?')} ({pos.get('id', '?')}): {e}")
+
+    # ── Step 2: check open positions for exits ────────────────────────────────
     for i, pos in enumerate(positions):
         if pos.get("status") != "open":
             continue
@@ -3396,17 +3531,20 @@ def monitor_bcs_positions():
                 "exit_reason": reason,
                 "result":      result,
             })
+            state_dirty = True
         except Exception as e:
             errors.append(f"{pos.get('ticker', '?')} ({pos.get('id', '?')}): {e}")
 
-    if closed:
+    if state_dirty:
         state["positions"] = positions
         _save_bcs_state(state)
 
     return {
+        "placed":     placed,
         "closed":     closed,
         "errors":     errors,
         "open_count": sum(1 for p in positions if p.get("status") == "open"),
+        "pending_count": sum(1 for p in positions if p.get("status") == "pending"),
     }
 
 
@@ -3421,6 +3559,45 @@ class BCSPlaceRequest(BaseModel):
     long_ask:       Optional[float] = None   # limit price for the long leg
     short_bid:      Optional[float] = None   # limit price for the short leg
     qty:            Optional[int]   = None   # overrides settings.qty when set
+
+
+@app.post("/api/bcs/queue")
+def queue_bcs_spread(req: BCSPlaceRequest):
+    """
+    Add a bull call spread to the plan queue (status='pending') without
+    submitting any orders immediately.  The next /api/bcs/monitor call will
+    place the orders and transition the position to 'open'.
+    """
+    import uuid
+    settings    = _load_bcs_settings()
+    qty         = req.qty if req.qty is not None else settings.get("qty", 1)
+    total_debit = round(req.net_debit * qty * 100, 2)
+
+    state = _load_bcs_state()
+    new_pos = {
+        "id":             str(uuid.uuid4())[:8],
+        "ticker":         req.ticker.upper(),
+        "long_contract":  req.long_contract,
+        "short_contract": req.short_contract,
+        "long_strike":    req.long_strike,
+        "short_strike":   req.short_strike,
+        "expiry":         req.expiry,
+        "qty":            qty,
+        "net_debit":      req.net_debit,
+        "debit_paid":     total_debit,
+        "long_ask":       req.long_ask,
+        "short_bid":      req.short_bid,
+        "entry_date":     _today_key(),
+        "status":         "pending",
+        "exit_reason":    None,
+        "exit_date":      None,
+    }
+    state.setdefault("positions", []).append(new_pos)
+    _save_bcs_state(state)
+    return {
+        "message": f"Bull call spread queued for {req.ticker.upper()}. Bot will place on next monitor cycle.",
+        "id":      new_pos["id"],
+    }
 
 
 @app.post("/api/bcs/place")
@@ -3519,15 +3696,24 @@ def place_bcs_spread(req: BCSPlaceRequest):
 
 @app.delete("/api/bcs/positions/{position_id}")
 def close_bcs_position_manually(position_id: str):
-    """Manually close an open BCS position by its ID (market orders on both legs)."""
+    """
+    Cancel a pending BCS plan, or manually close an open BCS position.
+    Pending plans are simply removed from state (no orders to cancel).
+    Open positions are closed via market orders on both legs.
+    """
     state     = _load_bcs_state()
     positions = state.get("positions", [])
     pos       = next(
-        (p for p in positions if p.get("id") == position_id and p.get("status") == "open"),
+        (p for p in positions if p.get("id") == position_id and p.get("status") in ("open", "pending")),
         None,
     )
     if pos is None:
-        raise HTTPException(status_code=404, detail=f"Open position '{position_id}' not found.")
+        raise HTTPException(status_code=404, detail=f"Active position '{position_id}' not found.")
+
+    if pos.get("status") == "pending":
+        state["positions"] = [p for p in positions if p.get("id") != position_id]
+        _save_bcs_state(state)
+        return {"message": f"Queued plan for {pos['ticker']} cancelled."}
 
     trading_client = _get_trading_client()
     result = _bcs_close_spread(pos, trading_client)
@@ -3951,6 +4137,10 @@ class BPSScanRequest(BaseModel):
     tickers: Optional[List[str]] = None
 
 
+class BPSBuildRequest(BaseModel):
+    ticker: str   # single ticker — no trend / entry-trigger validation
+
+
 @app.post("/api/bps/scan")
 def run_bps_scan(req: Optional[BPSScanRequest] = None):
     settings = _load_bps_settings()
@@ -3962,13 +4152,105 @@ def run_bps_scan(req: Optional[BPSScanRequest] = None):
     return result
 
 
+@app.post("/api/bps/build")
+def build_bps_spread(req: BPSBuildRequest):
+    """
+    Build a bear put spread for a single ticker WITHOUT trend or entry-trigger
+    validation — useful for manual placement directly from the watchlist or
+    planner page.  Returns the same candidate schema as /api/bps/scan so the
+    frontend can pass it straight to /api/bps/place.
+    """
+    ticker   = req.ticker.upper().strip()
+    settings = _load_bps_settings()
+
+    dte_min          = settings.get("dte_min", 30)
+    dte_max          = settings.get("dte_max", 45)
+    prefer_monthly   = settings.get("prefer_monthly", True)
+    spread_width_pct = settings.get("spread_width_pct", 0.075)
+    qty              = settings.get("qty", 1)
+
+    # Use the single-ticker endpoint — more reliable than the batch endpoint for one symbol
+    bars = _fetch_daily_bars(ticker, lookback=60)
+    if not bars:
+        raise HTTPException(status_code=404, detail=f"No price data found for {ticker}. Check that the ticker is valid and markets are accessible.")
+    price = bars[-1]["c"]
+
+    target_expiry = _bcs_find_expiry(dte_min, dte_max, prefer_monthly)  # same logic for puts
+
+    try:
+        chain = _get_option_chain(
+            underlying=ticker,
+            expiry_date=target_expiry,
+            option_type="put",
+            strike_gte=round(price * 0.80, 2),
+            strike_lte=round(price * 1.05, 2),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Option chain error for {ticker}: {e}")
+
+    if not chain:
+        raise HTTPException(status_code=404, detail=f"No puts found for {ticker} expiring {target_expiry}.")
+
+    long_item, short_item = _bps_find_strikes(chain, price, spread_width_pct)
+    if long_item is None or short_item is None:
+        raise HTTPException(status_code=404, detail=f"Could not find suitable put strikes for {ticker}.")
+
+    net_debit = _bcs_net_debit(long_item, short_item)  # formula identical
+    if net_debit is None or net_debit <= 0:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid net debit ({net_debit}) for {ticker} — check option liquidity.",
+        )
+
+    # Width = long strike − short strike (measured downward for puts)
+    spread_width = round(long_item["strike"] - short_item["strike"], 2)
+    max_gain     = round((spread_width - net_debit) * 100, 2)
+    max_loss     = round(net_debit * 100, 2)
+    risk_reward  = round(max_gain / max_loss, 2) if max_loss > 0 else None
+    dte          = long_item.get("dte") or short_item.get("dte")
+
+    return {
+        "ticker":                ticker,
+        "price":                 round(price, 2),
+        "expiry":                target_expiry,
+        "dte":                   dte,
+        "long_contract":         long_item["symbol"],
+        "short_contract":        short_item["symbol"],
+        "long_strike":           long_item["strike"],
+        "short_strike":          short_item["strike"],
+        "spread_width":          spread_width,
+        "long_bid":              long_item.get("bid"),
+        "long_ask":              long_item.get("ask"),
+        "short_bid":             short_item.get("bid"),
+        "short_ask":             short_item.get("ask"),
+        "net_debit":             net_debit,
+        "net_debit_total":       round(net_debit * 100 * qty, 2),
+        "max_gain_per_contract": max_gain,
+        "max_loss_per_contract": max_loss,
+        "risk_reward":           risk_reward,
+        "long_delta":            long_item.get("delta"),
+        "long_iv":               long_item.get("iv"),
+        "long_volume":           long_item.get("volume"),
+        "short_volume":          short_item.get("volume"),
+        "trigger":               None,
+    }
+
+
 @app.get("/api/bps/positions")
 def get_bps_positions():
+    """
+    Return all active (pending + open) BPS positions.
+    Pending positions are returned as-is (no live P/L — not yet filled).
+    Open positions are enriched with live P/L and exit-condition flags.
+    """
     state    = _load_bps_state()
     settings = _load_bps_settings()
-    open_pos = [p for p in state.get("positions", []) if p.get("status") == "open"]
+    active   = [p for p in state.get("positions", []) if p.get("status") in ("open", "pending")]
     enriched = []
-    for pos in open_pos:
+    for pos in active:
+        if pos.get("status") == "pending":
+            enriched.append({**pos, "exit_signal": None})
+            continue
         try:
             pos_pl      = _bps_get_position_pl(pos)
             exit_signal = _bps_check_exit(pos_pl, settings)
@@ -3981,11 +4263,54 @@ def get_bps_positions():
 
 @app.post("/api/bps/monitor")
 def monitor_bps_positions():
+    """
+    1. Place any pending BPS spreads (queued by the user via /api/bps/queue).
+    2. Check every open BPS position for profit-target, stop-loss, or time-stop
+       triggers and close qualifying positions.
+    """
+    from alpaca.trading.requests import LimitOrderRequest
+    from alpaca.trading.enums    import OrderSide, TimeInForce
+
     state     = _load_bps_state()
     settings  = _load_bps_settings()
     positions = state.get("positions", [])
-    closed, errors = [], []
+    placed, closed, errors = [], [], []
     trading_client = None
+    state_dirty = False
+
+    # ── Step 1: place pending entries ─────────────────────────────────────────
+    for i, pos in enumerate(positions):
+        if pos.get("status") != "pending":
+            continue
+        try:
+            if trading_client is None:
+                trading_client = _get_trading_client()
+
+            qty         = pos.get("qty", 1)
+            long_limit  = round(pos.get("long_ask") or pos["net_debit"] * 1.05, 2)
+            short_limit = round(max(pos.get("short_bid") or 0.05, 0.01), 2)
+
+            trading_client.submit_order(LimitOrderRequest(
+                symbol=pos["long_contract"],
+                qty=qty,
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY,
+                limit_price=long_limit,
+            ))
+            trading_client.submit_order(LimitOrderRequest(
+                symbol=pos["short_contract"],
+                qty=qty,
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.DAY,
+                limit_price=short_limit,
+            ))
+            positions[i]["status"] = "open"
+            placed.append(pos["ticker"])
+            state_dirty = True
+        except Exception as e:
+            errors.append(f"Entry {pos.get('ticker', '?')} ({pos.get('id', '?')}): {e}")
+
+    # ── Step 2: check open positions for exits ────────────────────────────────
     for i, pos in enumerate(positions):
         if pos.get("status") != "open":
             continue
@@ -4001,15 +4326,20 @@ def monitor_bps_positions():
             positions[i]["exit_reason"] = reason
             positions[i]["exit_date"]   = _today_key()
             closed.append({"id": pos["id"], "ticker": pos["ticker"], "exit_reason": reason, "result": result})
+            state_dirty = True
         except Exception as e:
             errors.append(f"{pos.get('ticker', '?')} ({pos.get('id', '?')}): {e}")
-    if closed:
+
+    if state_dirty:
         state["positions"] = positions
         _save_bps_state(state)
+
     return {
-        "closed":     closed,
-        "errors":     errors,
-        "open_count": sum(1 for p in positions if p.get("status") == "open"),
+        "placed":        placed,
+        "closed":        closed,
+        "errors":        errors,
+        "open_count":    sum(1 for p in positions if p.get("status") == "open"),
+        "pending_count": sum(1 for p in positions if p.get("status") == "pending"),
     }
 
 
@@ -4024,6 +4354,45 @@ class BPSPlaceRequest(BaseModel):
     long_ask:       Optional[float] = None
     short_bid:      Optional[float] = None
     qty:            Optional[int]   = None
+
+
+@app.post("/api/bps/queue")
+def queue_bps_spread(req: BPSPlaceRequest):
+    """
+    Add a bear put spread to the plan queue (status='pending') without
+    submitting any orders immediately.  The next /api/bps/monitor call will
+    place the orders and transition the position to 'open'.
+    """
+    import uuid
+    settings    = _load_bps_settings()
+    qty         = req.qty if req.qty is not None else settings.get("qty", 1)
+    total_debit = round(req.net_debit * qty * 100, 2)
+
+    state = _load_bps_state()
+    new_pos = {
+        "id":             str(uuid.uuid4())[:8],
+        "ticker":         req.ticker.upper(),
+        "long_contract":  req.long_contract,
+        "short_contract": req.short_contract,
+        "long_strike":    req.long_strike,
+        "short_strike":   req.short_strike,
+        "expiry":         req.expiry,
+        "qty":            qty,
+        "net_debit":      req.net_debit,
+        "debit_paid":     total_debit,
+        "long_ask":       req.long_ask,
+        "short_bid":      req.short_bid,
+        "entry_date":     _today_key(),
+        "status":         "pending",
+        "exit_reason":    None,
+        "exit_date":      None,
+    }
+    state.setdefault("positions", []).append(new_pos)
+    _save_bps_state(state)
+    return {
+        "message": f"Bear put spread queued for {req.ticker.upper()}. Bot will place on next monitor cycle.",
+        "id":      new_pos["id"],
+    }
 
 
 @app.post("/api/bps/place")
@@ -4108,14 +4477,25 @@ def place_bps_spread(req: BPSPlaceRequest):
 
 @app.delete("/api/bps/positions/{position_id}")
 def close_bps_position_manually(position_id: str):
+    """
+    Cancel a pending BPS plan, or manually close an open BPS position.
+    Pending plans are simply removed from state (no orders to cancel).
+    Open positions are closed via market orders on both legs.
+    """
     state     = _load_bps_state()
     positions = state.get("positions", [])
     pos       = next(
-        (p for p in positions if p.get("id") == position_id and p.get("status") == "open"),
+        (p for p in positions if p.get("id") == position_id and p.get("status") in ("open", "pending")),
         None,
     )
     if pos is None:
-        raise HTTPException(status_code=404, detail=f"Open BPS position '{position_id}' not found.")
+        raise HTTPException(status_code=404, detail=f"Active BPS position '{position_id}' not found.")
+
+    if pos.get("status") == "pending":
+        state["positions"] = [p for p in positions if p.get("id") != position_id]
+        _save_bps_state(state)
+        return {"message": f"Queued BPS plan for {pos['ticker']} cancelled."}
+
     trading_client = _get_trading_client()
     result = _bps_close_spread(pos, trading_client)
     for p in positions:

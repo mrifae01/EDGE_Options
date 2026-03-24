@@ -4,6 +4,91 @@ import { api } from '../lib/api.js'
 import { Plus, Trash2, Edit2, Check, X, RefreshCw, TrendingUp, TrendingDown, Clock, AlertCircle, Zap } from 'lucide-react'
 import './Plans.css'
 
+// ── Queued Spread Plans card ──────────────────────────────────────────────────
+function SpreadPlansCard() {
+  const [items,   setItems]   = useState([])
+  const [loading, setLoading] = useState(false)
+  const [busy,    setBusy]    = useState(null)   // id of item being cancelled
+
+  async function load() {
+    setLoading(true)
+    try {
+      const [bcs, bps] = await Promise.all([api.getBCSPositions(), api.getBPSPositions()])
+      const pending = [
+        ...(bcs.positions || []).filter(p => p.status === 'pending').map(p => ({ ...p, _kind: 'bull' })),
+        ...(bps.positions || []).filter(p => p.status === 'pending').map(p => ({ ...p, _kind: 'bear' })),
+      ]
+      setItems(pending)
+    } catch(e) {}
+    finally { setLoading(false) }
+  }
+
+  useEffect(() => { load() }, [])
+
+  async function cancel(item) {
+    setBusy(item.id)
+    try {
+      if (item._kind === 'bull') await api.closeBCSPosition(item.id)
+      else                       await api.closeBPSPosition(item.id)
+      await load()
+    } catch(e) { alert(e.message) }
+    finally { setBusy(null) }
+  }
+
+  if (!loading && items.length === 0) return null
+
+  return (
+    <div className="card">
+      <div className="card-title-row">
+        <div className="card-title" style={{ marginBottom: 0 }}>Queued Spread Plans ({items.length})</div>
+        <button className="btn btn-ghost" style={{ padding: '5px 10px', fontSize: 12, display: 'flex', alignItems: 'center', gap: 5 }} onClick={load} disabled={loading}>
+          <RefreshCw size={12} className={loading ? 'spin' : ''} /> Refresh
+        </button>
+      </div>
+      <p className="mono dim" style={{ fontSize: 11, margin: '6px 0 14px', lineHeight: 1.6 }}>
+        These spreads are queued — the bot will submit orders on the next monitor cycle.
+      </p>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Type</th><th>Ticker</th><th>Long Strike</th><th>Short Strike</th>
+              <th>Expiry</th><th>Net Debit</th><th>Qty</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map(item => (
+              <tr key={item.id} className="plan-row">
+                <td>
+                  <span className={`badge ${item._kind === 'bull' ? 'badge-green' : 'badge-red'}`}>
+                    {item._kind === 'bull' ? '↑ BULL' : '↓ BEAR'}
+                  </span>
+                </td>
+                <td><span className="mono">{item.ticker}</span></td>
+                <td><span className="mono">${item.long_strike}</span></td>
+                <td><span className="mono dim">${item.short_strike}</span></td>
+                <td><span className="mono dim" style={{ fontSize: 11 }}>{item.expiry}</span></td>
+                <td><span className="mono amber">${item.net_debit?.toFixed(2)}</span></td>
+                <td><span className="mono">{item.qty}</span></td>
+                <td>
+                  <button
+                    className="btn btn-ghost icon-btn"
+                    title="Cancel plan"
+                    disabled={busy === item.id}
+                    onClick={() => cancel(item)}
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 const EMPTY = {
   ticker: '', contract: '', qty: 1, type: 'LONG', sl_stock: '', tp_stock: ''
 }
@@ -348,6 +433,9 @@ export default function Plans() {
           )}
         </div>
       )}
+
+      {/* ── Queued Spread Plans ── */}
+      <SpreadPlansCard />
 
       {/* ── Active Plans Table ── */}
       <div className="card">

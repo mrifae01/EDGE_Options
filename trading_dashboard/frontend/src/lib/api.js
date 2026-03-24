@@ -46,6 +46,7 @@ export const api = {
   runBCSScan:          (tickers = null) => req('POST',   '/bcs/scan', tickers ? { tickers } : undefined),
   getBCSPositions:     ()               => req('GET',    '/bcs/positions'),
   monitorBCSPositions: ()               => req('POST',   '/bcs/monitor'),
+  queueBCSSpread:      (body)           => req('POST',   '/bcs/queue', body),
   placeBCSSpread:      (body)           => req('POST',   '/bcs/place', body),
   closeBCSPosition:    (id)             => req('DELETE', `/bcs/positions/${id}`),
 
@@ -55,6 +56,7 @@ export const api = {
   runBPSScan:          (tickers = null) => req('POST',   '/bps/scan', tickers ? { tickers } : undefined),
   getBPSPositions:     ()               => req('GET',    '/bps/positions'),
   monitorBPSPositions: ()               => req('POST',   '/bps/monitor'),
+  queueBPSSpread:      (body)           => req('POST',   '/bps/queue', body),
   placeBPSSpread:      (body)           => req('POST',   '/bps/place', body),
   closeBPSPosition:    (id)             => req('DELETE', `/bps/positions/${id}`),
 }

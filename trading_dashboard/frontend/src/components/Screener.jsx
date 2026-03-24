@@ -1799,22 +1799,19 @@ function SpreadQuickPanel({ symbol, direction }) {
 
   async function scan() {
     setLoading(true); setError(null); setSpread(null); setMsg(null)
-    var endpoint = isBull ? "/api/bcs/scan" : "/api/bps/scan"
+    var endpoint = isBull ? "/api/bcs/build" : "/api/bps/build"
     try {
-      var res  = await fetch(endpoint, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ tickers: [symbol] }) })
+      var res  = await fetch(endpoint, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ ticker: symbol }) })
       var data = await res.json()
       if (!res.ok) throw new Error(data.detail || res.statusText)
-      var candidates = data.candidates || []
-      var match = candidates.find(function(c){ return c.ticker === symbol }) || candidates[0]
-      if (!match) throw new Error("No valid " + (isBull ? "bull call" : "bear put") + " spread found for " + symbol + " — check trend and liquidity data.")
-      setSpread(match)
+      setSpread(data)
     } catch(e) { setError(e.message) } finally { setLoading(false) }
   }
 
   async function place() {
     if (!spread) return
     setPlacing(true)
-    var endpoint = isBull ? "/api/bcs/place" : "/api/bps/place"
+    var endpoint = isBull ? "/api/bcs/queue" : "/api/bps/queue"
     try {
       var body = {
         ticker: spread.ticker, long_contract: spread.long_contract,
@@ -1825,7 +1822,7 @@ function SpreadQuickPanel({ symbol, direction }) {
       var res = await fetch(endpoint, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) })
       var data = await res.json()
       if (!res.ok) throw new Error(data.detail || res.statusText)
-      setMsg("✓ Spread placed! Cost: $" + (data.total_debit != null ? parseFloat(data.total_debit).toFixed(2) : (spread.net_debit * 100).toFixed(2)))
+      setMsg("✓ Added to plan — bot will place on next cycle.")
       setTimeout(function(){ setMsg(null); setSpread(null) }, 4000)
     } catch(e) { setMsg("Error: " + e.message) } finally { setPlacing(false) }
   }
@@ -1924,7 +1921,7 @@ function SpreadQuickPanel({ symbol, direction }) {
             onClick={place}
             disabled={placing}
           >
-            {placing ? "Placing…" : "Place " + (isBull ? "Bull" : "Bear") + " Spread"}
+            {placing ? "Adding…" : "Add to Plan"}
           </button>
         </div>
       )}
