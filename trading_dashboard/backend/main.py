@@ -25,12 +25,14 @@ dotenv.load_dotenv()
 # ── Path config ──────────────────────────────────────────────────────────────
 # Adjust this to wherever your bot + state file live
 BOT_DIR = Path(__file__).parent.parent / "bot"
-BOT_SCRIPT = BOT_DIR / "daily_option_trader.py"
-STATE_FILE = BOT_DIR / "daily_bot_state.json"
-PLANS_FILE = BOT_DIR / "plans.json"
-BOT_LOG_FILE = BOT_DIR / "bot.log"
-PID_FILE = BOT_DIR / "bot.pid"
-PL_HISTORY_FILE = BOT_DIR / "pl_history.json"
+BOT_SCRIPT             = BOT_DIR / "daily_option_trader.py"
+SPREAD_MONITOR_SCRIPT  = BOT_DIR / "spread_monitor.py"
+STATE_FILE             = BOT_DIR / "daily_bot_state.json"
+PLANS_FILE             = BOT_DIR / "plans.json"
+BOT_LOG_FILE           = BOT_DIR / "bot.log"
+PID_FILE               = BOT_DIR / "bot.pid"
+SPREAD_PID_FILE        = BOT_DIR / "spread_monitor.pid"
+PL_HISTORY_FILE        = BOT_DIR / "pl_history.json"
 
 # ── Alpaca credentials ────────────────────────────────────────────────────────
 # These must match what's in your daily_option_trader.py
@@ -89,6 +91,25 @@ def _clear_pid():
         PID_FILE.unlink()
 
 
+# ── Spread-monitor process helpers ────────────────────────────────────────────
+def _read_spread_pid() -> Optional[int]:
+    if SPREAD_PID_FILE.exists():
+        try:
+            return int(SPREAD_PID_FILE.read_text().strip())
+        except Exception:
+            return None
+    return None
+
+
+def _write_spread_pid(pid: int):
+    SPREAD_PID_FILE.write_text(str(pid))
+
+
+def _clear_spread_pid():
+    if SPREAD_PID_FILE.exists():
+        SPREAD_PID_FILE.unlink()
+
+
 def _is_running(pid: Optional[int]) -> bool:
     if pid is None:
         return False
@@ -143,11 +164,18 @@ def _read_log_tail(n_lines: int = 200) -> list[str]:
 # ── Routes: status & control ─────────────────────────────────────────────────
 @app.get("/api/status")
 def get_status():
-    pid     = _read_pid()
-    running = _is_running(pid)
-    if not running:
+    pid        = _read_pid()
+    spread_pid = _read_spread_pid()
+    main_up    = _is_running(pid)
+    spread_up  = _is_running(spread_pid)
+    running    = main_up or spread_up
+
+    if not main_up:
         _clear_pid()
         pid = None
+    if not spread_up:
+        _clear_spread_pid()
+        spread_pid = None
 
     state = _load_state()
     today = _get_today_bucket(state)
@@ -248,20 +276,22 @@ def get_market_status():
 
 @app.post("/api/bot/start")
 def start_bot():
-    pid = _read_pid()
-    if _is_running(pid):
+    pid        = _read_pid()
+    spread_pid = _read_spread_pid()
+
+    if _is_running(pid) and _is_running(spread_pid):
         raise HTTPException(status_code=400, detail="Bot is already running.")
 
     if not BOT_SCRIPT.exists():
         raise HTTPException(status_code=500, detail=f"Bot script not found at {BOT_SCRIPT}")
 
-    # Build command — pass plans file only if it exists and has entries
+    # ── Main single-leg options bot ───────────────────────────────────────────
     cmd = [sys.executable, str(BOT_SCRIPT)]
     if PLANS_FILE.exists() and _load_plans():
         cmd += ["--plans", str(PLANS_FILE)]
 
     log_fd = open(BOT_LOG_FILE, "a")
-    proc = subprocess.Popen(
+    proc   = subprocess.Popen(
         cmd,
         cwd=str(BOT_DIR),
         stdout=log_fd,
@@ -270,8 +300,22 @@ def start_bot():
     )
     _write_pid(proc.pid)
 
+    # ── Spread monitor (BCS + BPS) ────────────────────────────────────────────
+    if SPREAD_MONITOR_SCRIPT.exists() and not _is_running(spread_pid):
+        bcs_settings  = _load_bcs_settings()
+        poll_interval = bcs_settings.get("poll_seconds", 300)
+
+        sproc = subprocess.Popen(
+            [sys.executable, str(SPREAD_MONITOR_SCRIPT), "--interval", str(poll_interval)],
+            cwd=str(BOT_DIR),
+            stdout=open(BOT_LOG_FILE, "a"),
+            stderr=open(BOT_LOG_FILE, "a"),
+            start_new_session=True,
+        )
+        _write_spread_pid(sproc.pid)
+
     plans_count = len(_load_plans()) if PLANS_FILE.exists() else 0
-    warning = _check_market_hours()
+    warning     = _check_market_hours()
     return {
         "message":     "Bot started.",
         "pid":         proc.pid,
@@ -282,16 +326,34 @@ def start_bot():
 
 @app.post("/api/bot/stop")
 def stop_bot():
-    pid = _read_pid()
-    if not _is_running(pid):
+    pid        = _read_pid()
+    spread_pid = _read_spread_pid()
+
+    if not _is_running(pid) and not _is_running(spread_pid):
         _clear_pid()
+        _clear_spread_pid()
         raise HTTPException(status_code=400, detail="Bot is not running.")
-    try:
-        os.kill(pid, signal.SIGTERM)
-        _clear_pid()
-        return {"message": f"Bot (PID {pid}) stopped."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    errors = []
+
+    if _is_running(pid):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception as e:
+            errors.append(f"main bot: {e}")
+    _clear_pid()
+
+    if _is_running(spread_pid):
+        try:
+            os.kill(spread_pid, signal.SIGTERM)
+        except Exception as e:
+            errors.append(f"spread monitor: {e}")
+    _clear_spread_pid()
+
+    if errors:
+        raise HTTPException(status_code=500, detail="; ".join(errors))
+
+    return {"message": "Bot stopped."}
 
 
 @app.get("/api/bot/logs")
@@ -3192,6 +3254,50 @@ def _bcs_scan(settings: dict, tickers_override: Optional[List[str]] = None) -> d
     }
 
 
+def _refresh_spread_limits(long_contract: str, short_contract: str) -> tuple:
+    """
+    Fetch live quotes for both spread legs and return fresh limit prices.
+
+    Long leg  → we BUY  → use the live ask (+ 5% buffer for fill probability)
+    Short leg → we SELL → use the live bid
+
+    Returns (long_limit, short_limit).  Falls back to (None, None) on any error
+    so the caller can fall back to stored stale prices.
+    """
+    try:
+        from alpaca.data.historical import OptionHistoricalDataClient
+        from alpaca.data.requests   import OptionSnapshotRequest
+
+        opt_client = OptionHistoricalDataClient(API_KEY, API_SECRET)
+        snaps = opt_client.get_option_snapshot(
+            OptionSnapshotRequest(symbol_or_symbols=[long_contract, short_contract])
+        )
+
+        long_ask = short_bid = None
+
+        snap_long = snaps.get(long_contract)
+        if snap_long and snap_long.latest_quote:
+            a = snap_long.latest_quote.ask_price
+            if a:
+                long_ask = float(a)
+
+        snap_short = snaps.get(short_contract)
+        if snap_short and snap_short.latest_quote:
+            b = snap_short.latest_quote.bid_price
+            if b:
+                short_bid = float(b)
+
+        if long_ask is None or short_bid is None:
+            return None, None
+
+        long_limit  = round(long_ask  * 1.05, 2)          # pay up 5% to get filled
+        short_limit = round(max(short_bid * 0.95, 0.01), 2)  # shade slightly for fill
+        return long_limit, short_limit
+
+    except Exception:
+        return None, None
+
+
 def _bcs_get_position_pl(pos: dict) -> dict:
     """
     Fetch current mid-prices for both legs and compute unrealised P/L.
@@ -3484,25 +3590,32 @@ def monitor_bcs_positions():
             if trading_client is None:
                 trading_client = _get_trading_client()
 
-            qty         = pos.get("qty", 1)
-            long_limit  = round(pos.get("long_ask") or pos["net_debit"] * 1.05, 2)
-            short_limit = round(max(pos.get("short_bid") or 0.05, 0.01), 2)
+            qty = pos.get("qty", 1)
+
+            # Always fetch live quotes — stale prices from queue time are invalid
+            fresh_long, fresh_short = _refresh_spread_limits(
+                pos["long_contract"], pos["short_contract"]
+            )
+            long_limit  = fresh_long  if fresh_long  is not None else round(pos.get("long_ask")  or pos["net_debit"] * 1.05, 2)
+            short_limit = fresh_short if fresh_short is not None else round(max(pos.get("short_bid") or 0.05, 0.01), 2)
 
             trading_client.submit_order(LimitOrderRequest(
                 symbol=pos["long_contract"],
                 qty=qty,
                 side=OrderSide.BUY,
-                time_in_force=TimeInForce.DAY,
+                time_in_force=TimeInForce.GTC,
                 limit_price=long_limit,
             ))
             trading_client.submit_order(LimitOrderRequest(
                 symbol=pos["short_contract"],
                 qty=qty,
                 side=OrderSide.SELL,
-                time_in_force=TimeInForce.DAY,
+                time_in_force=TimeInForce.GTC,
                 limit_price=short_limit,
             ))
-            positions[i]["status"] = "open"
+            positions[i]["status"]     = "open"
+            positions[i]["long_ask"]   = long_limit   # update stored price to what we actually used
+            positions[i]["short_bid"]  = short_limit
             placed.append(pos["ticker"])
             state_dirty = True
         except Exception as e:
@@ -4286,25 +4399,32 @@ def monitor_bps_positions():
             if trading_client is None:
                 trading_client = _get_trading_client()
 
-            qty         = pos.get("qty", 1)
-            long_limit  = round(pos.get("long_ask") or pos["net_debit"] * 1.05, 2)
-            short_limit = round(max(pos.get("short_bid") or 0.05, 0.01), 2)
+            qty = pos.get("qty", 1)
+
+            # Always fetch live quotes — stale prices from queue time are invalid
+            fresh_long, fresh_short = _refresh_spread_limits(
+                pos["long_contract"], pos["short_contract"]
+            )
+            long_limit  = fresh_long  if fresh_long  is not None else round(pos.get("long_ask")  or pos["net_debit"] * 1.05, 2)
+            short_limit = fresh_short if fresh_short is not None else round(max(pos.get("short_bid") or 0.05, 0.01), 2)
 
             trading_client.submit_order(LimitOrderRequest(
                 symbol=pos["long_contract"],
                 qty=qty,
                 side=OrderSide.BUY,
-                time_in_force=TimeInForce.DAY,
+                time_in_force=TimeInForce.GTC,
                 limit_price=long_limit,
             ))
             trading_client.submit_order(LimitOrderRequest(
                 symbol=pos["short_contract"],
                 qty=qty,
                 side=OrderSide.SELL,
-                time_in_force=TimeInForce.DAY,
+                time_in_force=TimeInForce.GTC,
                 limit_price=short_limit,
             ))
-            positions[i]["status"] = "open"
+            positions[i]["status"]    = "open"
+            positions[i]["long_ask"]  = long_limit   # update stored price to what we actually used
+            positions[i]["short_bid"] = short_limit
             placed.append(pos["ticker"])
             state_dirty = True
         except Exception as e:

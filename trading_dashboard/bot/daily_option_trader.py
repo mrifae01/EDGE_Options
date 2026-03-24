@@ -194,6 +194,32 @@ def get_carry_bucket(state: dict) -> list:
         state["carry"] = []
     return state["carry"]
 
+def _load_spread_managed_symbols() -> set:
+    """
+    Return the set of ALL option contract symbols currently managed by the
+    BCS or BPS spread monitor (status 'open' or 'pending').
+
+    These symbols must NOT be touched by the single-leg daily bot — their
+    lifecycle is controlled entirely by spread_monitor.py.
+    """
+    managed = set()
+    for fname in ("bcs_state.json", "bps_state.json"):
+        fpath = Path(fname)
+        if not fpath.exists():
+            continue
+        try:
+            data = json.loads(fpath.read_text())
+            for pos in data.get("positions", []):
+                if pos.get("status") in ("open", "pending"):
+                    for key in ("long_contract", "short_contract"):
+                        sym = pos.get(key, "").upper().strip()
+                        if sym:
+                            managed.add(sym)
+        except Exception:
+            pass
+    return managed
+
+
 def seed_states_from_any_open_positions(trading_client: TradingClient, states: dict[str, State]) -> None:
     """
     If plans.json is empty, we still want to keep the bot alive to manage any
@@ -206,8 +232,15 @@ def seed_states_from_any_open_positions(trading_client: TradingClient, states: d
     - We infer ticker as the leading letters of the position symbol (works for OCC option sym like TSLA260...).
     - We set wide SL/TP sentinels so stock-based SL/TP won't auto-fire unless you provided them via carry/plans.
     - The bot will still run TP-partial + breakeven-stop management because that is option P/L based.
+    - Spread legs tracked by spread_monitor.py (bcs_state / bps_state) are explicitly skipped so
+      the two systems never interfere with each other.
     """
     import re
+
+    # Symbols already managed by the spread monitor — leave them alone
+    spread_managed = _load_spread_managed_symbols()
+    if spread_managed:
+        print(f"[BOOT] Spread-managed symbols (excluded from single-leg seeding): {sorted(spread_managed)}")
 
     positions = trading_client.get_all_positions()
     if not positions:
@@ -216,6 +249,11 @@ def seed_states_from_any_open_positions(trading_client: TradingClient, states: d
     for p in positions:
         sym = str(p.symbol).upper().strip()
         if not sym:
+            continue
+
+        # Skip any leg that belongs to an active spread
+        if sym in spread_managed:
+            print(f"[BOOT] Skipping {sym} — managed by spread monitor.")
             continue
 
         m = re.match(r"^([A-Z]+)", sym)
