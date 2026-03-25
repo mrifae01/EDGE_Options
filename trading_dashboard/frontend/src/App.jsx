@@ -61,8 +61,8 @@ const TABS = [
   { id: 'screener',  label: 'Screener',   Icon: Search },
   { id: 'spreads',   label: 'Spreads',    Icon: TrendingUp },
   { id: 'history',   label: 'History',    Icon: BarChart2 },
-  { id: 'logs',      label: 'Logs',       Icon: Terminal },
-  { id: 'eddy',      label: 'Eddy',       Icon: MessageSquare },
+  // { id: 'logs',      label: 'Logs',       Icon: Terminal },
+  // { id: 'eddy',      label: 'Eddy',       Icon: MessageSquare },
   { id: 'settings',  label: 'Settings',   Icon: Settings },
 ]
 

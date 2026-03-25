@@ -21,6 +21,7 @@ export const api = {
   getLogs:           (n = 200) => req('GET',    `/bot/logs?lines=${n}`),
   getPositions:      ()        => req('GET',    '/positions'),
   getHistory:        ()        => req('GET',    '/history'),
+  clearHistory:      ()        => req('DELETE', '/history'),
   getPlans:          ()        => req('GET',    '/plans'),
   savePlans:         (plans)   => req('POST',   '/plans', plans),
   deletePlan:        (ticker)  => req('DELETE', `/plans/${ticker}`),

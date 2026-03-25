@@ -565,20 +565,103 @@ def get_positions():
 
 @app.get("/api/history")
 def get_history():
-    """Returns per-day trade history from the state file."""
+    """Returns per-day trade history from the state file, enriched with spread positions."""
     state = _load_state()
-    days = state.get("days", {})
-    history = []
-    for day_key in sorted(days.keys(), reverse=True):
-        bucket = days[day_key]
-        traded = bucket.get("traded_today", [])
+    days  = state.get("days", {})
+
+    # Build a dict keyed by date
+    all_days: dict = {}
+
+    # ── Single-leg entries ─────────────────────────────────────────────────────
+    for day_key, bucket in days.items():
+        traded  = bucket.get("traded_today", [])
         tickers = bucket.get("tickers", {})
-        history.append({
-            "date": day_key,
-            "traded_tickers": traded,
-            "tickers": tickers,
-        })
-    return {"history": history}
+        if not traded and not tickers:
+            continue
+        entry = all_days.setdefault(day_key, {"date": day_key, "single_leg": [], "spreads": []})
+        for ticker in traded:
+            info = tickers.get(ticker, {})
+            entry["single_leg"].append({
+                "ticker":           ticker,
+                "original_qty":     info.get("original_qty"),
+                "partial_qty_sold": info.get("partial_qty_sold", 0),
+                "took_partial":     info.get("took_partial", False),
+                "sl_stock":         info.get("sl_stock"),
+                "tp_stock":         info.get("tp_stock"),
+                "contract":         info.get("contract"),
+                "entry_avg_price":  info.get("entry_avg_price"),
+                "exit_price":       info.get("exit_price"),
+                "exit_reason":      info.get("exit_reason"),
+                "peak_plpc":        info.get("peak_plpc"),
+            })
+
+    # ── Spread entries (BCS + BPS) ─────────────────────────────────────────────
+    spread_sources = [
+        (_load_bcs_state(), "bull_call_spread"),
+        (_load_bps_state(), "bear_put_spread"),
+    ]
+    for spread_state, strategy in spread_sources:
+        for pos in spread_state.get("positions", []):
+            # Bucket by entry_date (fall back to exit_date)
+            day_key = (pos.get("entry_date") or pos.get("exit_date") or "")[:10]
+            if not day_key:
+                continue
+            entry = all_days.setdefault(day_key, {"date": day_key, "single_leg": [], "spreads": []})
+            entry["spreads"].append({
+                "id":             pos.get("id"),
+                "ticker":         pos.get("ticker"),
+                "strategy":       strategy,
+                "long_contract":  pos.get("long_contract"),
+                "short_contract": pos.get("short_contract"),
+                "long_strike":    pos.get("long_strike"),
+                "short_strike":   pos.get("short_strike"),
+                "expiry":         pos.get("expiry"),
+                "qty":            pos.get("qty"),
+                "net_debit":      pos.get("net_debit"),
+                "debit_paid":     pos.get("debit_paid"),
+                "status":         pos.get("status"),
+                "exit_reason":    pos.get("exit_reason"),
+                "exit_date":      pos.get("exit_date"),
+            })
+
+    history = sorted(all_days.values(), key=lambda x: x["date"], reverse=True)
+
+    total_single = sum(len(d["single_leg"]) for d in history)
+    total_spreads = sum(len(d["spreads"]) for d in history)
+
+    return {
+        "history": history,
+        "stats": {
+            "total_single_leg": total_single,
+            "total_spreads":    total_spreads,
+            "total_entries":    total_single + total_spreads,
+        },
+    }
+
+
+@app.delete("/api/history")
+def clear_history():
+    """Clears all single-leg trade history (days bucket) and closed spread positions.
+    Open/pending spread positions are preserved.
+    """
+    # Clear single-leg days history
+    state = _load_state()
+    state["days"] = {}
+    tmp = str(STATE_FILE) + ".tmp"
+    Path(tmp).write_text(json.dumps(state, indent=2))
+    os.replace(tmp, STATE_FILE)
+
+    # Remove only closed spread positions from BCS state
+    bcs = _load_bcs_state()
+    bcs["positions"] = [p for p in bcs.get("positions", []) if p.get("status") not in ("closed",)]
+    _save_bcs_state(bcs)
+
+    # Remove only closed spread positions from BPS state
+    bps = _load_bps_state()
+    bps["positions"] = [p for p in bps.get("positions", []) if p.get("status") not in ("closed",)]
+    _save_bps_state(bps)
+
+    return {"cleared": True}
 
 
 # ── Routes: plans ─────────────────────────────────────────────────────────────

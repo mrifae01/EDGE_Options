@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { usePolling } from '../hooks/usePolling.js'
 import { api } from '../lib/api.js'
-import { Minus, AlertTriangle, Edit2, X, Check, XCircle, Clock, Loader2 } from 'lucide-react'
+import { Minus, AlertTriangle, Edit2, X, Check, XCircle, Clock, Loader2, ArrowUpRight, ArrowDownRight } from 'lucide-react'
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts'
 import './Dashboard.css'
 
@@ -324,6 +324,253 @@ function EditPanel({ pos, onSave, onClose, onClosePosition }) {
   )
 }
 
+// ── OCC symbol helpers ────────────────────────────────────────────────────────
+function parseOCCStrike(contract) {
+  const m = contract && contract.match(/[A-Z]+\d{6}[CP](\d{8})$/)
+  return m ? parseInt(m[1], 10) / 1000 : null
+}
+function parseOCCExpiry(contract) {
+  const m = contract && contract.match(/[A-Z]+(\d{2})(\d{2})(\d{2})[CP]/)
+  if (!m) return null
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+  return `${months[parseInt(m[2],10)-1]} ${parseInt(m[3],10)}, 20${m[1]}`
+}
+
+// ── Spread Pair Card ──────────────────────────────────────────────────────────
+function SpreadPairCard({ longLeg, shortLeg, onCloseSpread, onSelect, selected }) {
+  const [confirming, setConfirming] = useState(false)
+  const [busy,       setBusy]       = useState(false)
+  const [msg,        setMsg]        = useState(null)
+
+  const anchor = longLeg ?? shortLeg
+  const isBull = anchor.strategy_label === 'bull_call_spread'
+  const ticker     = anchor.ticker
+  const stockPrice = longLeg?.stock_price ?? shortLeg?.stock_price
+  const spreadId   = anchor.spread_id
+  const expiry     = parseOCCExpiry(anchor.contract)
+
+  // Derive correct long/short display legs from strike prices, not the backend tag.
+  // Bull call spread: long = lower strike call, short = higher strike call.
+  // Bear put spread:  long = higher strike put, short = lower strike put.
+  // This guards against swapped leg labels in the state file.
+  const strikeA = longLeg  ? parseOCCStrike(longLeg.contract)  : null
+  const strikeB = shortLeg ? parseOCCStrike(shortLeg.contract) : null
+  const legsSwapped = longLeg && shortLeg && strikeA != null && strikeB != null && (
+    isBull ? strikeA > strikeB   // bull: long should be lower
+           : strikeA < strikeB   // bear: long should be higher
+  )
+  const displayLong  = legsSwapped ? shortLeg : longLeg
+  const displayShort = legsSwapped ? longLeg  : shortLeg
+  const longStrike  = displayLong  ? parseOCCStrike(displayLong.contract)  : null
+  const shortStrike = displayShort ? parseOCCStrike(displayShort.contract) : null
+  const longPlpc    = displayLong?.last_plpc
+  const shortPlpc   = displayShort?.last_plpc
+
+  // ── Live spread P/L (same formula the bot uses for exit logic) ────────────
+  // Uses unrealized_pl (dollars) from each leg — Alpaca reports this correctly
+  // as positive-when-profitable for both long and short positions, unlike
+  // last_plpc which is null for short legs (cost_basis is negative for shorts).
+  // spread_pl_pct = (long_upl + short_upl) / (net_debit * 100 * qty)
+  const spreadPl = (() => {
+    const longUpl  = displayLong?.unrealized_pl
+    const shortUpl = displayShort?.unrealized_pl
+    if (longUpl == null || shortUpl == null) return null
+    const longEntry  = displayLong?.entry_avg_price
+    const shortEntry = displayShort?.entry_avg_price
+    if (longEntry == null || shortEntry == null) return null
+    const netDebit = longEntry - shortEntry
+    if (netDebit <= 0) return null
+    const qty     = displayLong?.current_qty ?? 1
+    const dollars = longUpl + shortUpl
+    return {
+      pct:     dollars / (netDebit * 100 * qty),
+      dollars: Math.round(dollars),
+    }
+  })()
+
+  // ── Scenario math ─────────────────────────────────────────────────────────
+  const scenarios = (() => {
+    if (!displayLong || !displayShort || longStrike == null || shortStrike == null) return null
+    const longEntry  = displayLong.entry_avg_price
+    const shortEntry = displayShort.entry_avg_price
+    if (longEntry == null || shortEntry == null) return null
+    const qty         = displayLong.current_qty ?? 1
+    const netDebit    = longEntry - shortEntry
+    const spreadWidth = Math.abs(longStrike - shortStrike)
+    const maxGain     = Math.round((spreadWidth - netDebit) * 100 * qty)
+    const maxLoss     = Math.round(netDebit * 100 * qty)
+    const breakeven   = isBull ? longStrike + netDebit : longStrike - netDebit
+    const lowerStrike  = isBull ? longStrike  : shortStrike
+    const higherStrike = isBull ? shortStrike : longStrike
+
+    const fp = p => `$${p % 1 === 0 ? p.toFixed(0) : p.toFixed(2)}`
+    const fm = v => v === 0 ? '$0' : v > 0 ? `+$${v.toLocaleString()}` : `-$${Math.abs(v).toLocaleString()}`
+
+    const rows = isBull ? [
+      { label: 'Best case',  dot: 'green',  range: `Above ${fp(higherStrike)}`,                          pl: fm(maxGain),               plClass: 'green' },
+      { label: 'Good',       dot: 'green',  range: `${fp(breakeven)} – ${fp(higherStrike)}`,             pl: `+$1 to ${fm(maxGain)}`,   plClass: 'green' },
+      { label: 'Breakeven',  dot: 'muted',  range: `~${fp(breakeven)}`,                                  pl: '$0',                      plClass: 'muted' },
+      { label: 'Bad',        dot: 'amber',  range: `${fp(lowerStrike)} – ${fp(breakeven)}`,              pl: `-$1 to ${fm(-maxLoss)}`,  plClass: 'red'   },
+      { label: 'Worst case', dot: 'red',    range: `Below ${fp(lowerStrike)}`,                           pl: fm(-maxLoss),              plClass: 'red'   },
+    ] : [
+      { label: 'Best case',  dot: 'green',  range: `Below ${fp(lowerStrike)}`,                           pl: fm(maxGain),               plClass: 'green' },
+      { label: 'Good',       dot: 'green',  range: `${fp(lowerStrike)} – ${fp(breakeven)}`,              pl: `+$1 to ${fm(maxGain)}`,   plClass: 'green' },
+      { label: 'Breakeven',  dot: 'muted',  range: `~${fp(breakeven)}`,                                  pl: '$0',                      plClass: 'muted' },
+      { label: 'Bad',        dot: 'amber',  range: `${fp(breakeven)} – ${fp(higherStrike)}`,             pl: `-$1 to ${fm(-maxLoss)}`,  plClass: 'red'   },
+      { label: 'Worst case', dot: 'red',    range: `Above ${fp(higherStrike)}`,                          pl: fm(-maxLoss),              plClass: 'red'   },
+    ]
+    return { rows, maxGain, maxLoss, netDebit, breakeven, qty }
+  })()
+
+  async function doClose() {
+    setBusy(true); setMsg(null)
+    try {
+      const closeFn = isBull ? api.closeBCSPosition : api.closeBPSPosition
+      const result  = await closeFn(spreadId)
+      setMsg({ err: false, text: result.queued ? 'Queued for next open.' : 'Spread closed.' })
+      onCloseSpread(spreadId, result.queued)
+    } catch(e) {
+      setMsg({ err: true, text: e.message })
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div
+      className={`spread-pair-card ${isBull ? 'spread-bull' : 'spread-bear'}${selected ? ' pos-selected' : ''}`}
+      onClick={e => {
+        if (!e.target.closest('.spread-close-row') && !e.target.closest('.spread-confirm')) {
+          onSelect(ticker)
+        }
+      }}
+      style={{ cursor: 'pointer' }}
+    >
+      {/* ── Header ── */}
+      <div className="spread-pair-header">
+        <div>
+          <div className="pos-ticker">{ticker}</div>
+          {expiry && <div className="mono dim" style={{ fontSize: 11, marginTop: 2 }}>exp {expiry}</div>}
+        </div>
+        <span className={`badge ${isBull ? 'badge-purple' : 'badge-red'}`} style={{ display:'flex', alignItems:'center', gap:4 }}>
+          {isBull ? <ArrowUpRight size={11}/> : <ArrowDownRight size={11}/>}
+          {isBull ? 'BULL CALL SPREAD' : 'BEAR PUT SPREAD'}
+        </span>
+      </div>
+
+      {/* ── Top info strip: stock price + legs ── */}
+      <div className="spread-top-strip">
+
+        {/* Stock price */}
+        <div className="spread-stock-col">
+          <span className="dim mono" style={{ fontSize: 9, letterSpacing:'0.12em' }}>CURRENT PRICE</span>
+          <span className="mono" style={{ fontSize: 26, fontWeight: 700, color: 'var(--text-1)', lineHeight: 1.1 }}>
+            {stockPrice != null ? `$${stockPrice.toFixed(2)}` : '—'}
+          </span>
+          {spreadPl != null ? (
+            <div style={{ marginTop: 8 }}>
+              <div className="mono dim" style={{ fontSize: 9, letterSpacing:'0.12em' }}>SPREAD P/L</div>
+              <div style={{ display:'flex', alignItems:'baseline', gap: 8, marginTop: 2 }}>
+                <span className={`mono ${plClass(spreadPl.pct)}`} style={{ fontSize: 22, fontWeight: 700, lineHeight: 1 }}>
+                  {spreadPl.pct >= 0 ? '+' : ''}{(spreadPl.pct * 100).toFixed(1)}%
+                </span>
+                <span className={`mono ${plClass(spreadPl.pct)}`} style={{ fontSize: 12 }}>
+                  {spreadPl.dollars >= 0 ? '+' : '-'}${Math.abs(spreadPl.dollars).toLocaleString()}
+                </span>
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+        {/* Legs */}
+        <div className="spread-legs-row">
+          <div className="spread-leg">
+            <div className={`spread-leg-badge ${isBull ? 'spread-leg-long-badge' : 'spread-leg-short-badge'}`}>{isBull ? 'BUY · LONG' : 'BUY · SHORT'}</div>
+            <div className="spread-leg-strike mono">
+              {longStrike != null ? `$${longStrike % 1 === 0 ? longStrike.toFixed(0) : longStrike.toFixed(2)}` : '—'}
+            </div>
+            <div className="dim mono" style={{ fontSize: 9, letterSpacing:'0.1em' }}>STRIKE</div>
+            {displayLong && <div className="mono dim" style={{ fontSize: 9, marginTop: 5, wordBreak:'break-all' }}>{displayLong.contract}</div>}
+          </div>
+
+          <div className="spread-legs-divider"/>
+
+          <div className="spread-leg">
+            <div className={`spread-leg-badge ${isBull ? 'spread-leg-short-badge' : 'spread-leg-long-badge'}`}>{isBull ? 'SELL · SHORT' : 'SELL · LONG'}</div>
+            {displayShort ? (
+              <>
+                <div className="spread-leg-strike mono">
+                  {shortStrike != null ? `$${shortStrike % 1 === 0 ? shortStrike.toFixed(0) : shortStrike.toFixed(2)}` : '—'}
+                </div>
+                <div className="dim mono" style={{ fontSize: 9, letterSpacing:'0.1em' }}>STRIKE</div>
+                <div className="mono dim" style={{ fontSize: 9, marginTop: 5, wordBreak:'break-all' }}>{displayShort.contract}</div>
+              </>
+            ) : (
+              <div className="mono dim" style={{ fontSize: 11, marginTop: 8 }}>pending…</div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Scenarios table ── */}
+      {scenarios ? (
+        <div className="spread-scenarios">
+          <div className="spread-scenarios-head">
+            <span>SCENARIO</span>
+            <span>{ticker} AT EXPIRY</span>
+            <span>P&amp;L</span>
+          </div>
+          {scenarios.rows.map((row, i) => (
+            <div key={i} className={`spread-scenario-row spread-scenario-${row.dot}`}>
+              <span className="spread-scenario-label">
+                <span className={`spread-dot spread-dot-${row.dot}`}/>
+                {row.label}
+              </span>
+              <span className="mono">{row.range}</span>
+              <span className={`mono ${row.plClass}`}>{row.pl}</span>
+            </div>
+          ))}
+          <div className="spread-scenarios-footer">
+            <span>Net debit <strong>${scenarios.netDebit.toFixed(2)}</strong>/share</span>
+            <span>Max gain <strong className="green">+${scenarios.maxGain.toLocaleString()}</strong></span>
+            <span>Max loss <strong className="red">-${scenarios.maxLoss.toLocaleString()}</strong></span>
+            <span>Qty <strong>{scenarios.qty}</strong></span>
+          </div>
+        </div>
+      ) : (
+        <div className="mono dim" style={{ fontSize: 11, padding: '8px 0' }}>
+          {displayLong && displayShort
+            ? 'Entry prices not yet available — scenarios will appear once both legs fill.'
+            : 'Waiting for both legs to be placed…'}
+        </div>
+      )}
+
+      {/* ── Close ── */}
+      <div className="spread-close-row">
+        {!confirming ? (
+          <button className="btn btn-danger" style={{ fontSize: 12, padding: '6px 14px' }}
+            onClick={e => { e.stopPropagation(); setConfirming(true) }} disabled={busy}>
+            <XCircle size={12}/> Close Spread
+          </button>
+        ) : (
+          <div className="spread-confirm">
+            <span className="mono dim" style={{ fontSize: 12 }}>Close both legs — sure?</span>
+            <button className="btn btn-danger" style={{ fontSize: 12, padding: '6px 14px' }}
+              onClick={e => { e.stopPropagation(); doClose() }} disabled={busy}>
+              {busy ? 'Closing…' : 'Confirm'}
+            </button>
+            <button className="btn btn-ghost" style={{ fontSize: 12, padding: '6px 10px' }}
+              onClick={e => { e.stopPropagation(); setConfirming(false) }}>
+              Cancel
+            </button>
+          </div>
+        )}
+      </div>
+
+      {msg && <div className={`pos-edit-msg mono ${msg.err ? 'red' : 'green'}`}>{msg.text}</div>}
+    </div>
+  )
+}
+
 // ── Position card ─────────────────────────────────────────────────────────────
 function PositionCard({ pos, onUpdate, onClosePosition, onSelect, selected }) {
   const [editing, setEditing] = useState(false)
@@ -561,10 +808,37 @@ export default function Dashboard() {
   const positions = localPositions ?? posData?.positions ?? []
   const active    = positions.filter(p => p.status === 'active')
   const carry     = positions.filter(p => p.status === 'carry')
-  const avgPl     = positions.length > 0
-    ? positions.reduce((s, p) => s + (p.last_plpc ?? 0), 0) /
-      (positions.filter(p => p.last_plpc != null).length || 1)
-    : null
+
+  // Group spread pairs; everything else renders normally
+  const spreadPositions  = positions.filter(p => p.spread_id)
+  const regularPositions = positions.filter(p => !p.spread_id)
+  const spreadGroups     = {}
+  spreadPositions.forEach(p => {
+    if (!spreadGroups[p.spread_id]) spreadGroups[p.spread_id] = {}
+    spreadGroups[p.spread_id][p.spread_leg] = p
+  })
+
+  // Avg P/L: use spread-level P/L for spreads, last_plpc for regular positions
+  const avgPl = (() => {
+    const values = []
+    Object.values(spreadGroups).forEach(group => {
+      const legA = group.long ?? group.short
+      const legB = group.long && group.short ? (legA === group.long ? group.short : group.long) : null
+      if (!legA || !legB) return
+      const uplA = legA.unrealized_pl, uplB = legB.unrealized_pl
+      if (uplA == null || uplB == null) return
+      const entryA = legA.entry_avg_price, entryB = legB.entry_avg_price
+      if (entryA == null || entryB == null) return
+      const netDebit = Math.abs(entryA - entryB)
+      if (netDebit <= 0) return
+      const qty = legA.current_qty ?? legB.current_qty ?? 1
+      values.push((uplA + uplB) / (netDebit * 100 * qty))
+    })
+    regularPositions.forEach(p => {
+      if (p.last_plpc != null) values.push(p.last_plpc)
+    })
+    return values.length > 0 ? values.reduce((s, v) => s + v, 0) / values.length : null
+  })()
 
   function handleUpdate(updated) {
     // Persist SL/TP to localStorage so it survives polls and page reloads
@@ -581,6 +855,13 @@ export default function Dashboard() {
     if (!queued) {
       setLocalPositions(prev => prev.filter(p => p.contract !== contract))
       lsRemoveSlTp(contract)  // clear persisted SL/TP for closed position
+    }
+    loadQueue()
+  }
+
+  function handleCloseSpread(spreadId, queued) {
+    if (!queued) {
+      setLocalPositions(prev => prev.filter(p => p.spread_id !== spreadId))
     }
     loadQueue()
   }
@@ -633,7 +914,16 @@ export default function Dashboard() {
 
       {positions.length > 0 && (
         <div className="positions-grid">
-          {positions.map(pos => (
+          {Object.entries(spreadGroups).map(([id, group]) => (
+            <SpreadPairCard key={id}
+              longLeg={group.long}
+              shortLeg={group.short}
+              onCloseSpread={handleCloseSpread}
+              selected={chartTicker === (group.long?.ticker ?? group.short?.ticker)}
+              onSelect={ticker => setChartTicker(cur => cur === ticker ? null : ticker)}
+            />
+          ))}
+          {regularPositions.map(pos => (
             <PositionCard key={pos.ticker} pos={pos}
               onUpdate={handleUpdate}
               onClosePosition={handleClosePosition}

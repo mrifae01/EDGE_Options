@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -c \"import main; print\\(''OK''\\)\")"
+      "Bash(python -c \"import main; print\\(''OK''\\)\")",
+      "Bash(find /c/Users/mrifa/OneDrive/Desktop/Repos/EDGE_Options -type d -not -path */node_modules/* -not -path */.vite/* -not -path */dist/*)"
     ]
   }
 }

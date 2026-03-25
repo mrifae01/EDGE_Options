@@ -1,2 +1,259 @@
-.history-day-header { display: flex; align-items: center; gap: 16px; margin-bottom: 14px; }
-.history-date { font-size: 15px; font-weight: 500; color: var(--text-1); }
+/* ── Root ────────────────────────────────────────────────────────────────────── */
+.hist { display: flex; flex-direction: column; gap: 16px; }
+
+/* ── Header ──────────────────────────────────────────────────────────────────── */
+.hist-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.hist-header-left { display: flex; flex-direction: column; gap: 10px; }
+.hist-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-1);
+  margin: 0;
+}
+
+/* ── Filter tabs ─────────────────────────────────────────────────────────────── */
+.hist-filter-row {
+  display: flex;
+  gap: 3px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 3px;
+  width: fit-content;
+}
+.hist-filter-btn {
+  padding: 5px 14px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  border: none;
+  border-radius: calc(var(--radius) - 2px);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.hist-filter-btn:hover { color: var(--text-1); background: var(--bg-1); }
+.hist-filter-btn-on {
+  background: var(--blue-mute);
+  color: var(--blue);
+  border: 1px solid var(--blue);
+}
+
+/* ── Clear / confirm row ─────────────────────────────────────────────────────── */
+.hist-clear-btn { font-size: 12px; }
+.hist-confirm-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  background: #2a1f00;
+  border: 1px solid #ffc10740;
+  border-radius: var(--radius);
+  padding: 8px 14px;
+}
+
+/* ── Stats bar ───────────────────────────────────────────────────────────────── */
+.hist-stats {
+  display: flex;
+  align-items: center;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 14px 20px;
+  gap: 0;
+  flex-wrap: wrap;
+}
+.hist-stat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 100px;
+  padding: 4px 10px;
+}
+.hist-stat-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.hist-stat-value {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text-1);
+  line-height: 1.1;
+}
+.hist-stat-subs { display: flex; gap: 8px; flex-wrap: wrap; }
+.hist-stat-sub  { font-family: var(--font-mono); font-size: 11px; }
+.hist-stat-sub.blue { color: var(--blue); }
+.hist-stat-sub.dim  { color: var(--text-3); }
+.hist-stat-divider {
+  width: 1px;
+  height: 40px;
+  background: var(--border);
+  flex-shrink: 0;
+  margin: 0 4px;
+}
+
+/* ── Timeline ────────────────────────────────────────────────────────────────── */
+.hist-timeline { display: flex; flex-direction: column; gap: 12px; }
+
+/* ── Day section ─────────────────────────────────────────────────────────────── */
+.hist-day {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.hist-day-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+}
+.hist-day-date {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+.hist-day-rows { display: flex; flex-direction: column; }
+
+/* ── Entry row (shared) ──────────────────────────────────────────────────────── */
+.hist-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+  transition: background 0.1s;
+}
+.hist-row:last-child { border-bottom: none; }
+.hist-row:hover { background: var(--bg-2); }
+.hist-row-left  { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.hist-row-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; flex-shrink: 0; }
+
+/* ── Strategy badge ──────────────────────────────────────────────────────────── */
+.hist-strategy-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.hist-bull {
+  background: color-mix(in srgb, var(--green) 10%, transparent);
+  color: var(--green);
+  border: 1px solid color-mix(in srgb, var(--green) 25%, transparent);
+}
+.hist-bear {
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+  color: var(--red);
+  border: 1px solid color-mix(in srgb, var(--red) 25%, transparent);
+}
+.hist-single {
+  background: var(--bg-3);
+  color: var(--text-3);
+  border: 1px solid var(--border);
+}
+
+/* ── Ticker ──────────────────────────────────────────────────────────────────── */
+.hist-ticker {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-1);
+  letter-spacing: 0.04em;
+}
+.hist-meta  { font-size: 12px; color: var(--text-2); }
+.hist-arrow { color: var(--text-3); }
+
+/* ── Info chips ──────────────────────────────────────────────────────────────── */
+.hist-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.hist-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.hist-chip-green {
+  background: color-mix(in srgb, var(--green) 8%, transparent);
+  border-color: color-mix(in srgb, var(--green) 25%, transparent);
+  color: var(--green);
+}
+.hist-chip-red {
+  background: color-mix(in srgb, var(--red) 8%, transparent);
+  border-color: color-mix(in srgb, var(--red) 25%, transparent);
+  color: var(--red);
+}
+
+/* ── Status badges ───────────────────────────────────────────────────────────── */
+.hist-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.hist-badge-blue {
+  background: var(--blue-mute);
+  color: var(--blue);
+  border: 1px solid color-mix(in srgb, var(--blue) 30%, transparent);
+}
+.hist-badge-amber {
+  background: color-mix(in srgb, var(--amber) 12%, transparent);
+  color: var(--amber);
+  border: 1px solid color-mix(in srgb, var(--amber) 30%, transparent);
+}
+.hist-badge-green {
+  background: color-mix(in srgb, var(--green) 10%, transparent);
+  color: var(--green);
+  border: 1px solid color-mix(in srgb, var(--green) 25%, transparent);
+}
+.hist-badge-red {
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+  color: var(--red);
+  border: 1px solid color-mix(in srgb, var(--red) 25%, transparent);
+}
+.hist-badge-dim {
+  background: var(--bg-3);
+  color: var(--text-3);
+  border: 1px solid var(--border);
+}

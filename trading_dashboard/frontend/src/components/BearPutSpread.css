@@ -132,3 +132,35 @@
 /* ── Utility ─────────────────────────────────────────────────────────────────── */
 .spin { animation: spin 0.9s linear infinite; }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+/* ── Stock chart panel ───────────────────────────────────────────────────────── */
+.bps-chart-panel {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.bps-chart-hd {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 16px; border-bottom: 1px solid var(--border);
+  gap: 12px; flex-wrap: wrap;
+}
+.bps-chart-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.bps-chart-body  { position: relative; height: 460px; }
+.bps-chart-loading {
+  position: absolute; inset: 0; display: flex; align-items: center;
+  justify-content: center; gap: 10px; background: #080b0f;
+}
+.bps-tf-row {
+  display: flex; gap: 3px; align-items: center;
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 3px;
+}
+.bps-tf-btn {
+  padding: 4px 10px; font-family: var(--font-mono); font-size: 12px;
+  font-weight: 600; border: none; border-radius: calc(var(--radius) - 2px);
+  background: transparent; color: var(--text-3); cursor: pointer; transition: all 0.12s;
+}
+.bps-tf-btn:hover  { color: var(--text-1); background: var(--bg-1); }
+.bps-tf-btn-on     { background: var(--blue-mute); color: var(--blue); border: 1px solid var(--blue) !important; }
+.bps-sma-legend    { display: flex; gap: 10px; font-family: var(--font-mono); font-size: 11px; }
